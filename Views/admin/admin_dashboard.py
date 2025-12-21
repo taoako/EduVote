@@ -1,15 +1,13 @@
-"""
-Admin Dashboard Page - Main overview with stats, charts, and recent activity
-"""
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QScrollArea, QGraphicsDropShadowEffect, QSizePolicy
+    QScrollArea, QGraphicsDropShadowEffect
 )
 from PyQt6.QtGui import QFont, QColor
 from PyQt6.QtCore import Qt
 
 from .admin_components import StatCard, BarChart
-from Models.model_db import Database
+from Controller.controller_elections import get_admin_stats, get_recent_activity, get_dashboard_chart_data
 
 
 class ActivityItem(QFrame):
@@ -26,9 +24,11 @@ class ActivityItem(QFrame):
         avatar.setFixedSize(36, 36)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         avatar.setStyleSheet("""
-            background-color: #D1FAE5;
+            background: transparent;
+            border: 1px solid #E5E7EB;
             border-radius: 18px;
             font-size: 16px;
+            color: #10B981;
         """)
 
         # Text
@@ -39,7 +39,6 @@ class ActivityItem(QFrame):
         msg.setFont(QFont("Segoe UI", 11))
         msg.setStyleSheet("color: #111827;")
         msg.setWordWrap(True)
-        msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         time_lbl = QLabel(time_ago)
         time_lbl.setFont(QFont("Segoe UI", 9))
@@ -101,7 +100,6 @@ class AdminDashboardPage(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.db = Database()
         self._setup_ui()
         self._load_data()
 
@@ -164,104 +162,28 @@ class AdminDashboardPage(QWidget):
         layout.addLayout(content_row, 1)
 
     def _load_data(self):
-        """Load dashboard data from database"""
+        """Load dashboard data using controllers"""
         try:
-            conn = self.db.get_connection()
-            if not conn:
-                return
+            # Get admin stats from controller
+            stats = get_admin_stats()
+            self.total_voters_card.set_value(str(stats['total_voters']))
+            self.votes_casted_card.set_value(str(stats['votes_cast']))
+            self.participation_card.set_value(f"{stats['participation_rate']:.0f} %")
+            self.active_elections_card.set_value(str(stats['active_elections']))
 
-            cursor = conn.cursor(dictionary=True)
+            # Get chart data from controller
+            chart_info = get_dashboard_chart_data()
+            self.chart_title.setText(chart_info['title'])
+            self.bar_chart.set_data(chart_info['data'])
 
-            # Total voters
-            cursor.execute("SELECT COUNT(*) as count FROM users WHERE role = 'student'")
-            total_voters = cursor.fetchone()['count']
-            self.total_voters_card.set_value(str(total_voters))
-
-            # Votes casted (total voting records)
-            cursor.execute("SELECT COUNT(*) as count FROM voting_records")
-            votes_casted = cursor.fetchone()['count']
-            self.votes_casted_card.set_value(str(votes_casted))
-
-            # Participation rate
-            if total_voters > 0:
-                rate = (votes_casted / total_voters) * 100
-                self.participation_card.set_value(f"{rate:.0f} %")
-
-            # Active elections
-            cursor.execute("SELECT COUNT(*) as count FROM elections WHERE status = 'active'")
-            active_count = cursor.fetchone()['count']
-            self.active_elections_card.set_value(str(active_count))
-
-            # Chart data - prefer latest active; fallback to most recent election with candidates
-            chart_data = []
-            title_text = "Live Election Results"
-
-            cursor.execute(
-                """
-                SELECT * FROM elections
-                WHERE status = 'active'
-                ORDER BY start_date DESC, election_id DESC
-                LIMIT 1
-                """
-            )
-            active = cursor.fetchone()
-
-            target_election = active
-            if not target_election:
-                cursor.execute(
-                    """
-                    SELECT e.*
-                    FROM elections e
-                    WHERE EXISTS (
-                        SELECT 1 FROM candidates c WHERE c.election_id = e.election_id
-                    )
-                    ORDER BY COALESCE(e.end_date, e.start_date) DESC, e.election_id DESC
-                    LIMIT 1
-                    """
-                )
-                target_election = cursor.fetchone()
-
-            if target_election:
-                # Aggregate votes from voting_records to avoid stale vote_count
-                cursor.execute(
-                    """
-                    SELECT c.full_name,
-                           COALESCE(v.vote_total, c.vote_count, 0) AS votes
-                    FROM candidates c
-                    LEFT JOIN (
-                        SELECT candidate_id, COUNT(*) AS vote_total
-                        FROM voting_records
-                        WHERE candidate_id IS NOT NULL
-                        GROUP BY candidate_id
-                    ) v ON v.candidate_id = c.candidate_id
-                    WHERE c.election_id = %s
-                    ORDER BY votes DESC
-                    """,
-                    (target_election['election_id'],),
-                )
-                chart_data = [(row['full_name'], row['votes']) for row in cursor.fetchall()]
-                title_text = f"Live Election Results: {target_election.get('title', 'Election')}"
-
-            self.chart_title.setText(title_text)
-            self.bar_chart.set_data(chart_data)
-
-            # Recent activity (mock data for now - would need voting_records with timestamps)
+            # Get recent activity from controller
             self.activity_panel.clear_activities()
-            cursor.execute("""
-                SELECT u.full_name, e.title AS election_title, vr.voted_at
-                FROM voting_records vr
-                JOIN users u ON vr.user_id = u.user_id
-                JOIN elections e ON vr.election_id = e.election_id
-                ORDER BY vr.voted_at DESC LIMIT 5
-            """)
-            for row in cursor.fetchall():
+            activities = get_recent_activity(5)
+            for row in activities:
                 self.activity_panel.add_activity(
                     f"{row['full_name']}: voted in {row['election_title']}",
                     "recently"
                 )
-
-            cursor.close()
-            conn.close()
 
         except Exception as e:
             print(f"Dashboard load error: {e}")
