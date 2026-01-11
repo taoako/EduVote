@@ -266,21 +266,44 @@ class MainWindow(QMainWindow):
             end_date_fmt = end_date.strftime("%Y-%m-%d") if hasattr(end_date, "strftime") else (str(end_date) if end_date else "TBD")
             start_date = e.get("start_date")
             start_date_fmt = start_date.strftime("%Y-%m-%d") if hasattr(start_date, "strftime") else (str(start_date) if start_date else "TBD")
-            candidates = get_candidates_for_election(e.get("election_id"))
-            user_voted = has_user_voted(user_id, e.get("election_id")) if user_id else False
+            
+            election_id = e.get("election_id")
+            
+            # Try to get ballot data (positions with candidates)
+            ballot_response = db.get_election_ballot_data(election_id) if election_id else {}
+            ballot_data = ballot_response.get("positions", []) if ballot_response else []
+            
+            # Also get legacy candidates list
+            candidates = get_candidates_for_election(election_id)
+            
+            # Voting completion is per-position for ballot elections.
+            ballot_status = None
+            voted_position_ids = []
+            if user_id and election_id and ballot_data:
+                ballot_status = db.get_user_ballot_status(user_id, election_id)
+                voted_position_ids = ballot_status.get("voted_position_ids", []) if ballot_status else []
+                user_voted = bool(ballot_status.get("completed")) if ballot_status else False
+            else:
+                # Legacy: no positions => treat as one-vote-per-election
+                user_voted = has_user_voted(user_id, election_id) if user_id else False
+            
             blocks.append({
                 "election": {
-                    "election_id": e.get("election_id"),
+                    "election_id": election_id,
                     "title": e.get("title", "Election"),
                     "status": e.get("status", "upcoming"),
                     "start_date": start_date_fmt,
                     "end_date": end_date_fmt,
                     "user_voted": user_voted,
+                    "ballot_status": ballot_status,
+                    "voted_position_ids": voted_position_ids,
                 },
-                "candidates": candidates
+                "candidates": candidates,
+                "positions": ballot_data  # Positions with candidates for ballot voting
             })
 
         self.dashboard_page.set_elections(blocks)
+        self.dashboard_page.set_ballot_vote_handler(self._handle_ballot_vote)
 
     def _load_history_data(self):
         user_id = self.user_data.get("id") or self.user_data.get("user_id")
@@ -308,6 +331,41 @@ class MainWindow(QMainWindow):
             self.results_page.refresh()
         else:
             msg = message or "Vote failed."
+            if "already voted" in str(msg).lower():
+                QMessageBox.information(self, "Already Voted", msg)
+            else:
+                QMessageBox.warning(self, "Vote Failed", msg)
+
+    def _handle_ballot_vote(self, election_id: int, votes: list):
+        """Handle ballot-style voting with multiple positions."""
+        user_id = self.user_data.get("id") or self.user_data.get("user_id")
+        if not user_id:
+            QMessageBox.warning(self, "Not Logged In", "You must be logged in to vote.")
+            return
+
+        if not election_id:
+            QMessageBox.warning(self, "No Election", "No active election found.")
+            return
+
+        if not votes:
+            QMessageBox.warning(self, "No Votes", "No votes were selected.")
+            return
+
+        db = Database()
+        success, message = db.cast_ballot_votes(user_id, election_id, votes)
+        
+        if success:
+            vote_count = len(votes)
+            QMessageBox.information(
+                self, 
+                "Ballot Submitted", 
+                f"Your ballot has been successfully submitted!\n\nYou voted for {vote_count} position(s).\n\n{message}"
+            )
+            self._load_election_data()
+            self._load_history_data()
+            self.results_page.refresh()
+        else:
+            msg = message or "Ballot submission failed."
             if "already voted" in str(msg).lower():
                 QMessageBox.information(self, "Already Voted", msg)
             else:

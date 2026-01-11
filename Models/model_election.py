@@ -22,6 +22,7 @@ class Election(Base):
     created_at = Column(TIMESTAMP, server_default=func.current_timestamp())
 
     # Relationships
+    positions = relationship("Position", back_populates="election", cascade="all, delete-orphan", order_by="Position.display_order")
     candidates = relationship("Candidate", back_populates="election", cascade="all, delete-orphan")
     voting_records = relationship("VotingRecord", back_populates="election", cascade="all, delete-orphan")
 

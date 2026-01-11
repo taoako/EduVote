@@ -76,6 +76,11 @@ def get_election_results(election_id: int = None) -> dict:
     return _db.get_election_results(election_id)
 
 
+def get_election_results_by_position(election_id: int) -> dict:
+    """Get election results grouped by position."""
+    return _db.get_election_results_by_position(election_id)
+
+
 def get_admin_stats() -> dict:
     """Get admin dashboard statistics."""
     return _db.get_admin_stats()
@@ -86,6 +91,37 @@ def get_recent_activity(limit: int = 5) -> list[dict]:
     return _db.get_recent_activity(limit)
 
 
-def get_dashboard_chart_data() -> dict:
+def get_dashboard_chart_data(mode: str = "results") -> dict:
     """Get chart data for admin dashboard."""
-    return _db.get_dashboard_chart_data()
+    return _db.get_dashboard_chart_data(mode=mode)
+
+
+# === Position management ===
+def get_positions_for_election(election_id: int) -> list[dict]:
+    """Get all positions for an election."""
+    return _db.get_positions_for_election(election_id)
+
+
+def create_position(election_id: int, title: str, display_order: int = 0) -> tuple[bool, str, int | None]:
+    """Create a new position for an election."""
+    return _db.create_position(election_id, title, display_order)
+
+
+def update_position(position_id: int, title: str, display_order: int = None) -> tuple[bool, str]:
+    """Update a position."""
+    return _db.update_position(position_id, title, display_order)
+
+
+def delete_position(position_id: int) -> tuple[bool, str]:
+    """Delete a position."""
+    return _db.delete_position(position_id)
+
+
+def get_election_ballot_data(election_id: int) -> dict:
+    """Get complete ballot data for an election (positions with candidates)."""
+    return _db.get_election_ballot_data(election_id)
+
+
+def assign_candidate_to_position(candidate_id: int, position_id: int) -> tuple[bool, str]:
+    """Assign a candidate to a position."""
+    return _db.assign_candidate_to_position(candidate_id, position_id)

@@ -462,3 +462,432 @@ class SidebarButton(QPushButton):
 
     def set_active(self, is_active: bool):
         self.setStyleSheet(self.active_style if is_active else self.base_style)
+
+
+class PositionCandidateCard(QFrame):
+    """Candidate card for ballot voting - single selection per position."""
+    clicked = pyqtSignal()
+
+    def __init__(self, candidate_id: int, name: str, slogan: str, photo_path: str | None):
+        super().__init__()
+        self.candidate_id = candidate_id
+        self._selected = False
+        self._disabled = False
+        self.setFixedSize(180, 200)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._update_style()
+
+        # Resolve relative photos
+        resolved_photo = photo_path
+        if resolved_photo and not os.path.isabs(resolved_photo):
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            resolved_photo = os.path.join(base_dir, resolved_photo)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 16, 14, 14)
+        layout.setSpacing(8)
+
+        # Avatar
+        avatar = CircularImageAvatar(resolved_photo, name[0] if name else "?", size=60)
+        layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Name
+        name_lbl = QLabel(name or "Unknown")
+        name_lbl.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setStyleSheet("color: #111827; background: transparent;")
+        name_lbl.setWordWrap(True)
+        layout.addWidget(name_lbl)
+
+        # Slogan
+        slogan_lbl = QLabel(slogan or "")
+        slogan_lbl.setFont(QFont("Segoe UI", 9))
+        slogan_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        slogan_lbl.setStyleSheet("color: #6B7280; background: transparent;")
+        slogan_lbl.setWordWrap(True)
+        slogan_lbl.setMaximumHeight(40)
+        layout.addWidget(slogan_lbl)
+
+        layout.addStretch()
+
+        # Checkmark indicator
+        self.check_label = QLabel("✓ Selected")
+        self.check_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.check_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self.check_label.setStyleSheet("color: #10B981; background: transparent;")
+        self.check_label.setVisible(False)
+        layout.addWidget(self.check_label)
+
+    def _update_style(self):
+        if self._disabled:
+            self.setStyleSheet("""
+                PositionCandidateCard {
+                    background: #F3F4F6;
+                    border: 1px solid #E5E7EB;
+                    border-radius: 16px;
+                }
+            """)
+            if hasattr(self, 'check_label'):
+                self.check_label.setVisible(False)
+            return
+        if self._selected:
+            self.setStyleSheet("""
+                PositionCandidateCard {
+                    background: #ECFDF5;
+                    border: 2px solid #10B981;
+                    border-radius: 16px;
+                }
+            """)
+            if hasattr(self, 'check_label'):
+                self.check_label.setVisible(True)
+        else:
+            self.setStyleSheet("""
+                PositionCandidateCard {
+                    background: #FFFFFF;
+                    border: 1px solid #E5E7EB;
+                    border-radius: 16px;
+                }
+                PositionCandidateCard:hover {
+                    border: 1px solid #10B981;
+                }
+            """)
+            if hasattr(self, 'check_label'):
+                self.check_label.setVisible(False)
+
+    def mousePressEvent(self, event):
+        if self._disabled:
+            return
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def set_selected(self, is_selected: bool):
+        self._selected = is_selected
+        self._update_style()
+
+    def set_disabled(self, disabled: bool):
+        self._disabled = bool(disabled)
+        self.setCursor(Qt.CursorShape.ArrowCursor if self._disabled else QCursor(Qt.CursorShape.PointingHandCursor))
+        self._update_style()
+
+    def is_selected(self) -> bool:
+        return self._selected
+
+
+class PositionSection(QFrame):
+    """Section for a single position with multiple candidate options."""
+    selection_changed = pyqtSignal(int, int)  # position_id, candidate_id (or -1 if none)
+
+    def __init__(self, position_id: int, position_title: str, candidates: list, *, locked: bool = False):
+        super().__init__()
+        self.position_id = position_id
+        self.position_title = position_title
+        self._cards = []
+        self._selected_candidate_id = None
+        self._locked = bool(locked)
+
+        self.setStyleSheet("""
+            PositionSection {
+                background: #FFFFFF;
+                border: 1px solid #E5E7EB;
+                border-radius: 16px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        # Position header
+        header = QHBoxLayout()
+        title_lbl = QLabel(position_title)
+        title_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title_lbl.setStyleSheet("color: #111827; background: transparent;")
+        header.addWidget(title_lbl)
+
+        header.addStretch()
+
+        self.status_label = QLabel("Select one candidate")
+        self.status_label.setFont(QFont("Segoe UI", 10))
+        self.status_label.setStyleSheet("color: #9CA3AF; background: transparent;")
+        header.addWidget(self.status_label)
+
+        layout.addLayout(header)
+
+        # Candidates grid
+        grid_container = QWidget()
+        grid_layout = QGridLayout(grid_container)
+        grid_layout.setSpacing(15)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+
+        row, col = 0, 0
+        max_cols = 4
+
+        # Add an abstain card (candidate_id=0) so users can submit a blank ballot for this position.
+        abstain = PositionCandidateCard(
+            candidate_id=0,
+            name="Abstain",
+            slogan="No selection for this position",
+            photo_path=None,
+        )
+        abstain.clicked.connect(lambda: self._on_card_clicked(0))
+        self._cards.append(abstain)
+        grid_layout.addWidget(abstain, row, col)
+        col += 1
+        if col >= max_cols:
+            col = 0
+            row += 1
+
+        for c in candidates:
+            card = PositionCandidateCard(
+                candidate_id=c.get("candidate_id"),
+                name=c.get("full_name", "Unknown"),
+                slogan=c.get("slogan", ""),
+                photo_path=c.get("photo_path")
+            )
+            card.clicked.connect(lambda cid=c.get("candidate_id"): self._on_card_clicked(cid))
+            self._cards.append(card)
+            grid_layout.addWidget(card, row, col)
+            col += 1
+            if col >= max_cols:
+                col = 0
+                row += 1
+
+        layout.addWidget(grid_container)
+
+        if self._locked:
+            self.status_label.setText("✓ Already voted")
+            self.status_label.setStyleSheet("color: #10B981; font-weight: bold; background: transparent;")
+            for card in self._cards:
+                card.set_disabled(True)
+
+    def _on_card_clicked(self, candidate_id: int):
+        if self._locked:
+            return
+        self._selected_candidate_id = candidate_id
+        for card in self._cards:
+            card.set_selected(card.candidate_id == candidate_id)
+        self.status_label.setText("✓ Selected")
+        self.status_label.setStyleSheet("color: #10B981; font-weight: bold; background: transparent;")
+        self.selection_changed.emit(self.position_id, candidate_id)
+
+    def get_selected_candidate_id(self) -> int | None:
+        return self._selected_candidate_id
+
+    def is_completed(self) -> bool:
+        return self._locked or (self._selected_candidate_id is not None)
+
+    def is_locked(self) -> bool:
+        return self._locked
+
+
+class BallotVotingModal(QDialog):
+    """Ballot-style voting modal with multiple positions."""
+    ballot_submitted = pyqtSignal(list)  # emits list of {"position_id": int, "candidate_id": int}
+
+    def __init__(self, election_title: str, positions_data: list, voted_position_ids: list[int] | None = None, parent=None):
+        """
+        positions_data: list of {
+            "position": {"position_id": int, "title": str},
+            "candidates": [{"candidate_id": int, "full_name": str, "slogan": str, "photo_path": str}, ...]
+        }
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Cast Your Ballot")
+        self.setModal(True)
+        self.setMinimumSize(850, 650)
+        self.setStyleSheet("background-color: #F9FAFB;")
+
+        self._position_sections = []
+        self._total_positions = len(positions_data)
+        self._voted_position_ids = set(voted_position_ids or [])
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header
+        header_widget = QWidget()
+        header_widget.setStyleSheet("background-color: #FFFFFF;")
+        header_layout = QVBoxLayout(header_widget)
+        header_layout.setContentsMargins(30, 25, 30, 20)
+        header_layout.setSpacing(12)
+
+        title = QLabel("Cast Your Ballot")
+        title.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        title.setStyleSheet("color: #111827;")
+        header_layout.addWidget(title)
+
+        subtitle = QLabel(f"Vote for {election_title}")
+        subtitle.setFont(QFont("Segoe UI", 12))
+        subtitle.setStyleSheet("color: #6B7280;")
+        header_layout.addWidget(subtitle)
+
+        # Progress tracker
+        progress_container = QHBoxLayout()
+        progress_container.setSpacing(12)
+
+        self.progress_label = QLabel(f"Progress: 0/{self._total_positions} positions selected")
+        self.progress_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.progress_label.setStyleSheet("color: #374151;")
+        progress_container.addWidget(self.progress_label)
+
+        progress_container.addStretch()
+
+        # Progress bar visual
+        self.progress_bar = QFrame()
+        self.progress_bar.setFixedSize(200, 8)
+        self.progress_bar.setStyleSheet("""
+            QFrame {
+                background-color: #E5E7EB;
+                border-radius: 4px;
+            }
+        """)
+        self.progress_fill = QFrame(self.progress_bar)
+        self.progress_fill.setGeometry(0, 0, 0, 8)
+        self.progress_fill.setStyleSheet("""
+            QFrame {
+                background-color: #10B981;
+                border-radius: 4px;
+            }
+        """)
+        progress_container.addWidget(self.progress_bar)
+
+        header_layout.addLayout(progress_container)
+        layout.addWidget(header_widget)
+
+        # Scrollable content for positions
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background: transparent;")
+
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(30, 20, 30, 20)
+        content_layout.setSpacing(20)
+
+        for pos_data in positions_data:
+            pos = pos_data.get("position", {})
+            candidates = pos_data.get("candidates", [])
+            if not candidates:
+                continue
+
+            pos_id = pos.get("position_id")
+            locked = (pos_id in self._voted_position_ids)
+
+            section = PositionSection(
+                position_id=pos_id,
+                position_title=pos.get("title", "Position"),
+                candidates=candidates,
+                locked=locked
+            )
+            section.selection_changed.connect(self._on_selection_changed)
+            self._position_sections.append(section)
+            content_layout.addWidget(section)
+
+        content_layout.addStretch()
+        scroll.setWidget(content_widget)
+        layout.addWidget(scroll, 1)
+
+        # Footer with buttons
+        footer_widget = QWidget()
+        footer_widget.setStyleSheet("background-color: #FFFFFF;")
+        footer_layout = QHBoxLayout(footer_widget)
+        footer_layout.setContentsMargins(30, 20, 30, 25)
+        footer_layout.setSpacing(15)
+
+        # Warning label
+        self.warning_label = QLabel("⚠ Please select a candidate for each position before submitting.")
+        self.warning_label.setFont(QFont("Segoe UI", 10))
+        self.warning_label.setStyleSheet("color: #F59E0B;")
+        footer_layout.addWidget(self.warning_label)
+
+        footer_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedHeight(50)
+        cancel_btn.setMinimumWidth(140)
+        cancel_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        cancel_btn.setFont(QFont("Segoe UI", 12))
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #374151;
+                border: 1px solid #D1D5DB;
+                border-radius: 25px;
+            }
+            QPushButton:hover {
+                background-color: #F3F4F6;
+            }
+        """)
+        cancel_btn.clicked.connect(self.reject)
+
+        self.submit_btn = QPushButton("☑  Submit Ballot")
+        self.submit_btn.setFixedHeight(50)
+        self.submit_btn.setMinimumWidth(180)
+        self.submit_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.submit_btn.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self.submit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #10B981;
+                color: white;
+                border: none;
+                border-radius: 25px;
+            }
+            QPushButton:hover {
+                background-color: #059669;
+            }
+            QPushButton:disabled {
+                background-color: #9CA3AF;
+            }
+        """)
+        self.submit_btn.setEnabled(False)
+        self.submit_btn.clicked.connect(self._on_submit)
+
+        footer_layout.addWidget(cancel_btn)
+        footer_layout.addWidget(self.submit_btn)
+        layout.addWidget(footer_widget)
+
+        self._update_progress()
+
+    def _on_selection_changed(self, position_id: int, candidate_id: int):
+        self._update_progress()
+
+    def _update_progress(self):
+        completed = sum(1 for s in self._position_sections if s.is_completed())
+        total = len(self._position_sections)
+        remaining = sum(1 for s in self._position_sections if not s.is_locked())
+        remaining_done = sum(1 for s in self._position_sections if (not s.is_locked()) and s.get_selected_candidate_id() is not None)
+        self.progress_label.setText(f"Progress: {completed}/{total} positions completed")
+
+        # Update progress bar
+        if total > 0:
+            fill_width = int(200 * completed / total)
+            self.progress_fill.setGeometry(0, 0, fill_width, 8)
+
+        # Enable submit if all remaining (not-yet-voted) positions have a selection/abstain.
+        all_remaining_completed = (remaining == 0) or (remaining_done == remaining)
+        self.submit_btn.setEnabled(all_remaining_completed and remaining > 0)
+        if remaining == 0:
+            self.warning_label.setText("✓ You have already completed all positions in this election.")
+            self.warning_label.setStyleSheet("color: #10B981; font-weight: bold;")
+            self.warning_label.setVisible(True)
+        else:
+            self.warning_label.setText("⚠ Please select a candidate (or Abstain) for each remaining position before submitting.")
+            self.warning_label.setStyleSheet("color: #F59E0B;")
+            self.warning_label.setVisible(not all_remaining_completed)
+
+    def _on_submit(self):
+        votes = []
+        for section in self._position_sections:
+            if section.is_locked():
+                continue
+            candidate_id = section.get_selected_candidate_id()
+            if candidate_id is not None:
+                votes.append({
+                    "position_id": section.position_id,
+                    "candidate_id": None if int(candidate_id) == 0 else candidate_id
+                })
+        if votes:
+            self.ballot_submitted.emit(votes)
+            self.accept()

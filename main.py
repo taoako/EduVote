@@ -1,4 +1,4 @@
-# main.py
+
 import sys
 from PyQt6.QtWidgets import QApplication
 from Views.views_login import LoginView
@@ -30,11 +30,11 @@ if __name__ == "__main__":
 
     app.setStyleSheet(GLOBAL_STYLES)
 
-    # Initialize login view and controller (signup disabled)
+   
     login_view = LoginView()
     login_controller = LoginController(login_view, signup_view=None)
 
-    # Show login window
+
     login_view.show()
 
     sys.exit(app.exec())

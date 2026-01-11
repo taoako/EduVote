@@ -1,7 +1,7 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QScrollArea, QGraphicsDropShadowEffect
+    QScrollArea, QGraphicsDropShadowEffect, QSizePolicy, QComboBox
 )
 from PyQt6.QtGui import QFont, QColor
 from PyQt6.QtCore import Qt
@@ -13,11 +13,13 @@ from Controller.controller_elections import get_admin_stats, get_recent_activity
 class ActivityItem(QFrame):
     """Single activity item in the recent activity list"""
 
-    def __init__(self, text: str, time_ago: str):
+    def __init__(self, text: str, time_ago: str, date_text: str | None = None):
         super().__init__()
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(12)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Avatar
         avatar = QLabel("👤")
@@ -34,15 +36,19 @@ class ActivityItem(QFrame):
         # Text
         text_layout = QVBoxLayout()
         text_layout.setSpacing(2)
+        text_layout.setContentsMargins(0, 0, 0, 0)
 
         msg = QLabel(text)
         msg.setFont(QFont("Segoe UI", 11))
         msg.setStyleSheet("color: #111827;")
         msg.setWordWrap(True)
+        msg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        msg.setMinimumWidth(0)
 
-        time_lbl = QLabel(time_ago)
+        time_lbl = QLabel(date_text or time_ago)
         time_lbl.setFont(QFont("Segoe UI", 9))
         time_lbl.setStyleSheet("color: #9CA3AF;")
+        time_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         text_layout.addWidget(msg)
         text_layout.addWidget(time_lbl)
@@ -58,7 +64,7 @@ class RecentActivityPanel(QFrame):
         super().__init__()
         self.setStyleSheet("""
             RecentActivityPanel {
-                background-color: #FFFFFF;
+                background-color: transparent;
                 border-radius: 16px;
             }
         """)
@@ -84,8 +90,8 @@ class RecentActivityPanel(QFrame):
         layout.addLayout(self.activity_layout)
         layout.addStretch()
 
-    def add_activity(self, text: str, time_ago: str):
-        item = ActivityItem(text, time_ago)
+    def add_activity(self, text: str, time_ago: str, date_text: str | None = None):
+        item = ActivityItem(text, time_ago, date_text=date_text)
         self.activity_layout.addWidget(item)
 
     def clear_activities(self):
@@ -100,6 +106,7 @@ class AdminDashboardPage(QWidget):
 
     def __init__(self):
         super().__init__()
+        self._chart_mode = "results"
         self._setup_ui()
         self._load_data()
 
@@ -150,6 +157,32 @@ class AdminDashboardPage(QWidget):
         self.chart_title.setStyleSheet("color: #111827;")
         chart_layout.addWidget(self.chart_title)
 
+        # Chart mode selector
+        mode_row = QHBoxLayout()
+        mode_row.addStretch(1)
+        self.chart_mode_combo = QComboBox()
+        self.chart_mode_combo.addItem("Live Results", "results")
+        self.chart_mode_combo.addItem("Turnout by Position", "position_turnout")
+        self.chart_mode_combo.addItem("Turnout by Grade/Section (%)", "grade_section_turnout")
+        self.chart_mode_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #FFFFFF;
+                border: 1px solid #E5E7EB;
+                border-radius: 10px;
+                padding: 6px 10px;
+                color: #111827;
+                font-size: 12px;
+                font-family: 'Segoe UI';
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 24px;
+            }
+        """)
+        self.chart_mode_combo.currentIndexChanged.connect(self._on_chart_mode_changed)
+        mode_row.addWidget(self.chart_mode_combo)
+        chart_layout.addLayout(mode_row)
+
         self.bar_chart = BarChart()
         chart_layout.addWidget(self.bar_chart, 1)
 
@@ -172,30 +205,43 @@ class AdminDashboardPage(QWidget):
             self.active_elections_card.set_value(str(stats['active_elections']))
 
             # Get chart data from controller
-            chart_info = get_dashboard_chart_data()
-            self.chart_title.setText(chart_info['title'])
-            self.bar_chart.set_data(chart_info['data'])
+            self._load_chart()
 
             # Get recent activity from controller
             self.activity_panel.clear_activities()
             activities = get_recent_activity(5)
             for row in activities:
+                voted_at = row.get('voted_at')
+                try:
+                    date_text = voted_at.strftime('%Y-%m-%d %H:%M') if hasattr(voted_at, 'strftime') else str(voted_at or '')
+                except Exception:
+                    date_text = str(voted_at or '')
                 self.activity_panel.add_activity(
                     f"{row['full_name']}: voted in {row['election_title']}",
-                    "recently"
+                    "recently",
+                    date_text=date_text
                 )
 
         except Exception as e:
             print(f"Dashboard load error: {e}")
             # Show placeholder data
-            self.activity_panel.add_activity("Student: Voted Mang Kanor", "2 hours ago")
-            self.activity_panel.add_activity("Student: Voted Mang Kanor", "2 hours ago")
-            self.activity_panel.add_activity("Student: Voted Mang Kanor", "2 hours ago")
+            self.activity_panel.add_activity("Student: Voted Mang Kanor", "2 hours ago", date_text="")
+            self.activity_panel.add_activity("Student: Voted Mang Kanor", "2 hours ago", date_text="")
+            self.activity_panel.add_activity("Student: Voted Mang Kanor", "2 hours ago", date_text="")
 
             self.bar_chart.set_data([
                 ("Item 1", 7), ("Item 2", 11), ("Item 3", 15),
                 ("Item 4", 18), ("Item 5", 20), ("Item 6", 22)
             ])
+
+    def _on_chart_mode_changed(self, _index: int):
+        self._chart_mode = self.chart_mode_combo.currentData() or "results"
+        self._load_chart()
+
+    def _load_chart(self):
+        chart_info = get_dashboard_chart_data(self._chart_mode)
+        self.chart_title.setText(chart_info.get('title', 'Dashboard'))
+        self.bar_chart.set_data(chart_info.get('data', []))
 
     def refresh(self):
         """Refresh dashboard data"""

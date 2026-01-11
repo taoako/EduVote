@@ -8,8 +8,14 @@ It uses the SQLAlchemy ORM models:
     - Models.model_candidate.Candidate
     - Models.model_section.Section
     - Models.model_voting_record.VotingRecord
+    - Models.model_position.Position
 """
 import hashlib
+
+try:
+    import bcrypt as py_bcrypt
+except Exception:  # pragma: no cover
+    py_bcrypt = None
 from sqlalchemy import func, and_, or_
 from sqlalchemy.exc import IntegrityError
 from Models.base import get_session, init_db, get_connection
@@ -18,6 +24,7 @@ from Models.model_election import Election
 from Models.model_candidate import Candidate
 from Models.model_section import Section
 from Models.model_voting_record import VotingRecord
+from Models.model_position import Position
 
 
 class Database:
@@ -40,6 +47,33 @@ class Database:
     def hash_password(password: str) -> str:
         """Hash password using SHA-256."""
         return hashlib.sha256(password.encode()).hexdigest()
+
+    @staticmethod
+    def _verify_password(password: str, stored_hash: str | None) -> bool:
+        """Verify a plaintext password against either SHA-256 hex or bcrypt hashes."""
+        if not stored_hash:
+            return False
+
+        stored = stored_hash.strip()
+        if stored.startswith("$2"):
+            if py_bcrypt is None:
+                return False
+            try:
+                # MariaDB/phpMyAdmin dumps often use "$2y$" prefix; python bcrypt expects "$2b$".
+                normalized = stored
+                if normalized.startswith("$2y$"):
+                    normalized = "$2b$" + normalized[4:]
+
+                return bool(
+                    py_bcrypt.checkpw(
+                        password.encode("utf-8"),
+                        normalized.encode("utf-8"),
+                    )
+                )
+            except Exception:
+                return False
+
+        return Database.hash_password(password) == stored
     
     def username_exists(self, username: str) -> bool:
         """Check if username already exists."""
@@ -108,17 +142,40 @@ class Database:
         """Authenticate a user by username/student_id and password."""
         session = get_session()
         try:
-            password_hash = self.hash_password(password)
             user = session.query(User).filter(
-                and_(
-                    or_(User.username == username.strip(), User.student_id == student_id.strip()),
-                    User.password_hash == password_hash
+                or_(
+                    User.username == username.strip(),
+                    User.student_id == student_id.strip(),
                 )
             ).first()
-            
-            if user:
+
+            if user and self._verify_password(password, user.password_hash):
                 return True, user.to_dict()
             return False, None
+        finally:
+            session.close()
+
+    def reset_password(self, student_id: str, email: str, new_password: str) -> tuple[bool, str]:
+        """Reset a user's password by verifying student_id + email."""
+        session = get_session()
+        try:
+            sid = (student_id or "").strip()
+            em = (email or "").strip().lower()
+            if not sid or not em or not new_password:
+                return False, "Missing required information."
+
+            user = session.query(User).filter(
+                and_(User.student_id == sid, func.lower(User.email) == em)
+            ).first()
+            if not user:
+                return False, "No account matches that Student ID and email."
+
+            user.password_hash = self.hash_password(new_password)
+            session.commit()
+            return True, "Password reset successfully. You can now log in."
+        except Exception as e:
+            session.rollback()
+            return False, f"Password reset failed: {str(e)}"
         finally:
             session.close()
     
@@ -422,31 +479,303 @@ class Database:
         finally:
             session.close()
     
-    def get_dashboard_chart_data(self) -> dict:
-        """Get chart data for admin dashboard."""
+    def get_dashboard_chart_data(self, mode: str = "results") -> dict:
+        """Get chart data for admin dashboard.
+
+        Modes:
+        - results: candidate vote counts for the active/most recent election
+        - position_turnout: participation count per position in a ballot election
+        - grade_section_turnout: turnout percentage per grade or section (based on election restrictions)
+        """
         session = get_session()
         try:
-            # Get active election or most recent
+            chart_mode = (mode or "results").strip().lower()
+
+            # Select a target election.
             election = session.query(Election).filter(Election.status == 'active').order_by(
                 Election.start_date.desc()
             ).first()
-            
+
             if not election:
-                election = session.query(Election).filter(
-                    Election.candidates.any()
-                ).order_by(Election.end_date.desc()).first()
-            
+                if chart_mode == "position_turnout":
+                    election = session.query(Election).filter(
+                        Election.positions.any()
+                    ).order_by(Election.end_date.desc()).first()
+                else:
+                    election = session.query(Election).filter(
+                        Election.candidates.any()
+                    ).order_by(Election.end_date.desc()).first()
+
             if not election:
-                return {"title": "Live Election Results", "data": []}
-            
+                return {"title": "Dashboard", "data": []}
+
+            if chart_mode == "position_turnout":
+                positions = session.query(Position).filter(
+                    Position.election_id == election.election_id
+                ).order_by(Position.display_order).all()
+
+                if not positions:
+                    return {"title": f"Turnout by Position: {election.title}", "data": []}
+
+                counts = dict(
+                    session.query(
+                        VotingRecord.position_id,
+                        func.count(VotingRecord.record_id)
+                    ).filter(
+                        VotingRecord.election_id == election.election_id,
+                        VotingRecord.position_id.isnot(None)
+                    ).group_by(VotingRecord.position_id).all()
+                )
+
+                chart_data = [(p.title, int(counts.get(p.position_id, 0))) for p in positions]
+                return {"title": f"Turnout by Position: {election.title}", "data": chart_data}
+
+            if chart_mode == "grade_section_turnout":
+                # Turnout is measured as distinct users who participated in the election
+                # (cast or spoiled records count as participation).
+                allowed_grade = election.allowed_grade
+                allowed_section = (election.allowed_section or "").strip()
+
+                user_filters = []
+                if allowed_grade is not None:
+                    user_filters.append(User.grade_level == allowed_grade)
+                if allowed_section and allowed_section.upper() != "ALL":
+                    user_filters.append(func.upper(User.section) == allowed_section.upper())
+
+                # Choose breakdown: per-section when election is grade-restricted; otherwise per-grade.
+                breakdown = "grade"
+                if allowed_grade is not None:
+                    breakdown = "section"
+                if allowed_section and allowed_section.upper() != "ALL":
+                    breakdown = "section"
+
+                if breakdown == "section":
+                    totals = dict(
+                        session.query(User.section, func.count(User.user_id))
+                        .filter(User.role == 'student', *user_filters)
+                        .group_by(User.section)
+                        .all()
+                    )
+
+                    voters = dict(
+                        session.query(User.section, func.count(func.distinct(VotingRecord.user_id)))
+                        .join(VotingRecord, VotingRecord.user_id == User.user_id)
+                        .filter(
+                            VotingRecord.election_id == election.election_id,
+                            User.role == 'student',
+                            *user_filters
+                        )
+                        .group_by(User.section)
+                        .all()
+                    )
+
+                    data = []
+                    for section, total in totals.items():
+                        total_int = int(total or 0)
+                        voted_int = int(voters.get(section, 0) or 0)
+                        pct = int(round((voted_int / total_int) * 100)) if total_int > 0 else 0
+                        label = (section or "Unknown").strip() or "Unknown"
+                        data.append((label, pct))
+
+                    data.sort(key=lambda x: x[0].lower())
+                    return {"title": f"Turnout by Section (%): {election.title}", "data": data}
+
+                totals = dict(
+                    session.query(User.grade_level, func.count(User.user_id))
+                    .filter(User.role == 'student', *user_filters)
+                    .group_by(User.grade_level)
+                    .all()
+                )
+
+                voters = dict(
+                    session.query(User.grade_level, func.count(func.distinct(VotingRecord.user_id)))
+                    .join(VotingRecord, VotingRecord.user_id == User.user_id)
+                    .filter(
+                        VotingRecord.election_id == election.election_id,
+                        User.role == 'student',
+                        *user_filters
+                    )
+                    .group_by(User.grade_level)
+                    .all()
+                )
+
+                data = []
+                for grade, total in totals.items():
+                    total_int = int(total or 0)
+                    voted_int = int(voters.get(grade, 0) or 0)
+                    pct = int(round((voted_int / total_int) * 100)) if total_int > 0 else 0
+                    label = f"Grade {grade}" if grade is not None else "Unknown"
+                    data.append((label, pct))
+
+                data.sort(key=lambda x: ("999" if x[0] == "Unknown" else x[0]))
+                return {"title": f"Turnout by Grade (%): {election.title}", "data": data}
+
+            # Default: live results
             candidates = session.query(Candidate).filter(
                 Candidate.election_id == election.election_id
-            ).order_by(Candidate.vote_count.desc()).all()
-            
-            chart_data = [(c.full_name, c.vote_count) for c in candidates]
+            ).all()
+
+            vote_counts = dict(
+                session.query(VotingRecord.candidate_id, func.count(VotingRecord.record_id))
+                .filter(
+                    VotingRecord.election_id == election.election_id,
+                    VotingRecord.candidate_id.isnot(None),
+                    VotingRecord.status == 'cast'
+                )
+                .group_by(VotingRecord.candidate_id)
+                .all()
+            )
+
+            chart_data = []
+            for c in candidates:
+                # Prefer authoritative counts from voting_records; fall back to legacy candidate.vote_count.
+                count = vote_counts.get(c.candidate_id)
+                if count is None:
+                    count = c.vote_count or 0
+                chart_data.append((c.full_name, int(count)))
+
+            chart_data.sort(key=lambda x: x[1], reverse=True)
             title = f"Live Election Results: {election.title}"
-            
+
             return {"title": title, "data": chart_data}
+        finally:
+            session.close()
+
+    def get_election_chart_data(self, election_id: int, mode: str = "results") -> dict:
+        """Get chart data for a specific election.
+
+        This mirrors `get_dashboard_chart_data` but allows the caller to choose the election.
+        """
+        session = get_session()
+        try:
+            chart_mode = (mode or "results").strip().lower()
+            election = session.query(Election).filter(Election.election_id == election_id).first()
+            if not election:
+                return {"title": "Dashboard", "data": []}
+
+            if chart_mode == "position_turnout":
+                positions = session.query(Position).filter(
+                    Position.election_id == election.election_id
+                ).order_by(Position.display_order).all()
+
+                if not positions:
+                    return {"title": f"Turnout by Position: {election.title}", "data": []}
+
+                counts = dict(
+                    session.query(
+                        VotingRecord.position_id,
+                        func.count(VotingRecord.record_id)
+                    ).filter(
+                        VotingRecord.election_id == election.election_id,
+                        VotingRecord.position_id.isnot(None)
+                    ).group_by(VotingRecord.position_id).all()
+                )
+
+                chart_data = [(p.title, int(counts.get(p.position_id, 0))) for p in positions]
+                return {"title": f"Turnout by Position: {election.title}", "data": chart_data}
+
+            if chart_mode == "grade_section_turnout":
+                allowed_grade = election.allowed_grade
+                allowed_section = (election.allowed_section or "").strip()
+
+                user_filters = []
+                if allowed_grade is not None:
+                    user_filters.append(User.grade_level == allowed_grade)
+                if allowed_section and allowed_section.upper() != "ALL":
+                    user_filters.append(func.upper(User.section) == allowed_section.upper())
+
+                breakdown = "grade"
+                if allowed_grade is not None:
+                    breakdown = "section"
+                if allowed_section and allowed_section.upper() != "ALL":
+                    breakdown = "section"
+
+                if breakdown == "section":
+                    totals = dict(
+                        session.query(User.section, func.count(User.user_id))
+                        .filter(User.role == 'student', *user_filters)
+                        .group_by(User.section)
+                        .all()
+                    )
+
+                    voters = dict(
+                        session.query(User.section, func.count(func.distinct(VotingRecord.user_id)))
+                        .join(VotingRecord, VotingRecord.user_id == User.user_id)
+                        .filter(
+                            VotingRecord.election_id == election.election_id,
+                            User.role == 'student',
+                            *user_filters
+                        )
+                        .group_by(User.section)
+                        .all()
+                    )
+
+                    data = []
+                    for section, total in totals.items():
+                        total_int = int(total or 0)
+                        voted_int = int(voters.get(section, 0) or 0)
+                        pct = int(round((voted_int / total_int) * 100)) if total_int > 0 else 0
+                        label = (section or "Unknown").strip() or "Unknown"
+                        data.append((label, pct))
+
+                    data.sort(key=lambda x: x[0].lower())
+                    return {"title": f"Turnout by Section (%): {election.title}", "data": data}
+
+                totals = dict(
+                    session.query(User.grade_level, func.count(User.user_id))
+                    .filter(User.role == 'student', *user_filters)
+                    .group_by(User.grade_level)
+                    .all()
+                )
+
+                voters = dict(
+                    session.query(User.grade_level, func.count(func.distinct(VotingRecord.user_id)))
+                    .join(VotingRecord, VotingRecord.user_id == User.user_id)
+                    .filter(
+                        VotingRecord.election_id == election.election_id,
+                        User.role == 'student',
+                        *user_filters
+                    )
+                    .group_by(User.grade_level)
+                    .all()
+                )
+
+                data = []
+                for grade, total in totals.items():
+                    total_int = int(total or 0)
+                    voted_int = int(voters.get(grade, 0) or 0)
+                    pct = int(round((voted_int / total_int) * 100)) if total_int > 0 else 0
+                    label = f"Grade {grade}" if grade is not None else "Unknown"
+                    data.append((label, pct))
+
+                data.sort(key=lambda x: ("999" if x[0] == "Unknown" else x[0]))
+                return {"title": f"Turnout by Grade (%): {election.title}", "data": data}
+
+            # Default: live results (authoritative from voting_records)
+            candidates = session.query(Candidate).filter(
+                Candidate.election_id == election.election_id
+            ).all()
+
+            vote_counts = dict(
+                session.query(VotingRecord.candidate_id, func.count(VotingRecord.record_id))
+                .filter(
+                    VotingRecord.election_id == election.election_id,
+                    VotingRecord.candidate_id.isnot(None),
+                    VotingRecord.status == 'cast'
+                )
+                .group_by(VotingRecord.candidate_id)
+                .all()
+            )
+
+            chart_data = []
+            for c in candidates:
+                count = vote_counts.get(c.candidate_id)
+                if count is None:
+                    count = c.vote_count or 0
+                chart_data.append((c.full_name, int(count)))
+
+            chart_data.sort(key=lambda x: x[1], reverse=True)
+            return {"title": f"Live Election Results: {election.title}", "data": chart_data}
         finally:
             session.close()
     
@@ -603,38 +932,390 @@ class Database:
             session.close()
     
     def cast_vote(self, user_id: int, election_id: int, candidate_id: int) -> tuple[bool, str]:
-        """Cast a vote for a candidate."""
+        """Cast a vote for a candidate (legacy single-vote method)."""
         session = get_session()
         try:
-            # Check if already voted
-            existing = session.query(VotingRecord).filter(
-                and_(VotingRecord.user_id == user_id, VotingRecord.election_id == election_id)
-            ).first()
-            if existing:
-                return False, "You have already voted in this election."
+            candidate = session.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+            if not candidate:
+                return False, "Candidate not found."
+
+            # Vote is tracked per position (preferred). If position is missing, fall back to election-level.
+            position_id = candidate.position_id
+            if position_id is not None:
+                existing = session.query(VotingRecord).filter(
+                    and_(
+                        VotingRecord.user_id == user_id,
+                        VotingRecord.election_id == election_id,
+                        VotingRecord.position_id == position_id,
+                    )
+                ).first()
+                if existing:
+                    return False, "You have already voted for this position in this election."
+            else:
+                existing = session.query(VotingRecord).filter(
+                    and_(VotingRecord.user_id == user_id, VotingRecord.election_id == election_id)
+                ).first()
+                if existing:
+                    return False, "You have already voted in this election."
             
             # Create voting record
             record = VotingRecord(
                 user_id=user_id,
                 election_id=election_id,
+                position_id=position_id,
                 candidate_id=candidate_id,
                 status='cast'
             )
             session.add(record)
             
             # Update candidate vote count
-            candidate = session.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
-            if candidate:
-                candidate.vote_count = (candidate.vote_count or 0) + 1
+            candidate.vote_count = (candidate.vote_count or 0) + 1
             
             session.commit()
             return True, "Vote cast successfully!"
         except IntegrityError:
             session.rollback()
-            return False, "You have already voted in this election."
+            # Most commonly triggered by the unique index on (user_id, election_id, position_id)
+            return False, "You have already voted for this position in this election."
         except Exception as e:
             session.rollback()
             return False, f"Failed to cast vote: {str(e)}"
+        finally:
+            session.close()
+    
+    # === Position methods ===
+    def get_positions_for_election(self, election_id: int) -> list[dict]:
+        """Get all positions for an election, ordered by display_order."""
+        session = get_session()
+        try:
+            positions = session.query(Position).filter(
+                Position.election_id == election_id
+            ).order_by(Position.display_order).all()
+            return [p.to_dict() for p in positions]
+        finally:
+            session.close()
+    
+    def create_position(self, election_id: int, title: str, display_order: int = 0) -> tuple[bool, str, int | None]:
+        """Create a new position for an election."""
+        session = get_session()
+        try:
+            position = Position(
+                election_id=election_id,
+                title=title.strip(),
+                display_order=display_order
+            )
+            session.add(position)
+            session.commit()
+            position_id = position.position_id
+            return True, "Position created successfully!", position_id
+        except Exception as e:
+            session.rollback()
+            return False, f"Failed to create position: {str(e)}", None
+        finally:
+            session.close()
+    
+    def update_position(self, position_id: int, title: str, display_order: int = None) -> tuple[bool, str]:
+        """Update a position."""
+        session = get_session()
+        try:
+            position = session.query(Position).filter(Position.position_id == position_id).first()
+            if not position:
+                return False, "Position not found."
+            position.title = title.strip()
+            if display_order is not None:
+                position.display_order = display_order
+            session.commit()
+            return True, "Position updated successfully!"
+        except Exception as e:
+            session.rollback()
+            return False, f"Failed to update position: {str(e)}"
+        finally:
+            session.close()
+    
+    def delete_position(self, position_id: int) -> tuple[bool, str]:
+        """Delete a position."""
+        session = get_session()
+        try:
+            position = session.query(Position).filter(Position.position_id == position_id).first()
+            if not position:
+                return False, "Position not found."
+            session.delete(position)
+            session.commit()
+            return True, "Position deleted successfully!"
+        except Exception as e:
+            session.rollback()
+            return False, f"Failed to delete position: {str(e)}"
+        finally:
+            session.close()
+    
+    def get_candidates_by_position(self, position_id: int) -> list[dict]:
+        """Get candidates for a specific position."""
+        session = get_session()
+        try:
+            candidates = session.query(Candidate).filter(
+                Candidate.position_id == position_id
+            ).order_by(Candidate.full_name).all()
+            return [c.to_dict() for c in candidates]
+        finally:
+            session.close()
+    
+    def assign_candidate_to_position(self, candidate_id: int, position_id: int) -> tuple[bool, str]:
+        """Assign a candidate to a position."""
+        session = get_session()
+        try:
+            candidate = session.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+            if not candidate:
+                return False, "Candidate not found."
+            
+            position = session.query(Position).filter(Position.position_id == position_id).first()
+            if not position:
+                return False, "Position not found."
+            
+            candidate.position_id = position_id
+            # Also update legacy position text
+            candidate.position = position.title
+            session.commit()
+            return True, "Candidate assigned to position successfully!"
+        except Exception as e:
+            session.rollback()
+            return False, f"Failed to assign candidate: {str(e)}"
+        finally:
+            session.close()
+    
+    def get_election_ballot_data(self, election_id: int) -> dict:
+        """Get complete ballot data for an election (positions with candidates)."""
+        session = get_session()
+        try:
+            election = session.query(Election).filter(Election.election_id == election_id).first()
+            if not election:
+                return {"election": None, "positions": []}
+            
+            positions = session.query(Position).filter(
+                Position.election_id == election_id
+            ).order_by(Position.display_order).all()
+            
+            ballot_data = {
+                "election": election.to_dict(),
+                "positions": []
+            }
+            
+            for pos in positions:
+                candidates = session.query(Candidate).filter(
+                    Candidate.position_id == pos.position_id
+                ).order_by(Candidate.full_name).all()
+                
+                ballot_data["positions"].append({
+                    "position": pos.to_dict(),
+                    "candidates": [c.to_dict() for c in candidates]
+                })
+            
+            # Also include candidates without a position (legacy support)
+            unassigned = session.query(Candidate).filter(
+                and_(
+                    Candidate.election_id == election_id,
+                    Candidate.position_id.is_(None)
+                )
+            ).order_by(Candidate.full_name).all()
+            
+            if unassigned:
+                ballot_data["positions"].append({
+                    "position": {"position_id": None, "title": "General", "display_order": 999},
+                    "candidates": [c.to_dict() for c in unassigned]
+                })
+            
+            return ballot_data
+        finally:
+            session.close()
+    
+    def cast_ballot_votes(self, user_id: int, election_id: int, votes: list[dict]) -> tuple[bool, str]:
+        """
+        Cast votes for multiple positions in a single ballot.
+        votes: list of {"position_id": int, "candidate_id": int}
+        """
+        session = get_session()
+        try:
+            # Allow partial ballots: only block duplicates per position.
+            for vote in votes:
+                position_id = vote.get("position_id")
+                if position_id is None:
+                    continue
+                existing = session.query(VotingRecord).filter(
+                    and_(
+                        VotingRecord.user_id == user_id,
+                        VotingRecord.election_id == election_id,
+                        VotingRecord.position_id == position_id,
+                    )
+                ).first()
+                if existing:
+                    return False, "You have already voted for one or more positions in this election."
+            
+            # Create voting records for each position
+            for vote in votes:
+                position_id = vote.get("position_id")
+                candidate_id = vote.get("candidate_id")
+
+                status = 'cast' if candidate_id else 'spoiled'
+                
+                record = VotingRecord(
+                    user_id=user_id,
+                    election_id=election_id,
+                    position_id=position_id,
+                    candidate_id=candidate_id,
+                    status=status
+                )
+                session.add(record)
+                
+                # Update candidate vote count
+                if candidate_id and status == 'cast':
+                    candidate = session.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+                    if candidate:
+                        candidate.vote_count = (candidate.vote_count or 0) + 1
+            
+            session.commit()
+            return True, "Ballot submitted successfully!"
+        except IntegrityError:
+            session.rollback()
+            return False, "You have already voted for one or more positions in this election."
+        except Exception as e:
+            session.rollback()
+            return False, f"Failed to submit ballot: {str(e)}"
+        finally:
+            session.close()
+    
+    def has_user_voted_position(self, user_id: int, election_id: int, position_id: int) -> bool:
+        """Check if user has voted for a specific position."""
+        session = get_session()
+        try:
+            record = session.query(VotingRecord).filter(
+                and_(
+                    VotingRecord.user_id == user_id,
+                    VotingRecord.election_id == election_id,
+                    VotingRecord.position_id == position_id
+                )
+            ).first()
+            return record is not None
+        finally:
+            session.close()
+    
+    def get_user_ballot_status(self, user_id: int, election_id: int) -> dict:
+        """Get user's voting status for all positions in an election."""
+        session = get_session()
+        try:
+            # Get all positions for the election
+            positions = session.query(Position).filter(
+                Position.election_id == election_id
+            ).order_by(Position.display_order).all()
+            
+            # Get user's votes
+            user_votes = session.query(VotingRecord).filter(
+                and_(
+                    VotingRecord.user_id == user_id,
+                    VotingRecord.election_id == election_id
+                )
+            ).all()
+            
+            voted_positions = {v.position_id for v in user_votes}
+            total_positions = len(positions)
+            voted_count = len([p for p in positions if p.position_id in voted_positions])
+            
+            return {
+                "total_positions": total_positions,
+                "voted_count": voted_count,
+                "completed": voted_count == total_positions and total_positions > 0,
+                "voted_position_ids": list(voted_positions)
+            }
+        finally:
+            session.close()
+    
+    def get_election_results_by_position(self, election_id: int) -> dict:
+        """Get election results grouped by position."""
+        session = get_session()
+        try:
+            election = session.query(Election).filter(Election.election_id == election_id).first()
+            if not election:
+                return {"election": None, "positions": [], "total_votes": 0}
+
+            # Authoritative vote counts from voting_records (casts only), with legacy fallback.
+            vote_counts = dict(
+                session.query(VotingRecord.candidate_id, func.count(VotingRecord.record_id))
+                .filter(
+                    VotingRecord.election_id == election_id,
+                    VotingRecord.candidate_id.isnot(None),
+                    VotingRecord.status == 'cast'
+                )
+                .group_by(VotingRecord.candidate_id)
+                .all()
+            )
+            
+            positions = session.query(Position).filter(
+                Position.election_id == election_id
+            ).order_by(Position.display_order).all()
+            
+            results = {
+                "election": election.to_dict(),
+                "positions": [],
+                "total_votes": 0
+            }
+            
+            for pos in positions:
+                candidates = session.query(Candidate).filter(
+                    Candidate.position_id == pos.position_id
+                ).all()
+
+                candidate_dicts = []
+                for c in candidates:
+                    votes = vote_counts.get(c.candidate_id)
+                    if votes is None:
+                        votes = c.vote_count or 0
+                    d = c.to_dict()
+                    d['vote_count'] = int(votes)
+                    candidate_dicts.append(d)
+
+                candidate_dicts.sort(key=lambda x: int(x.get('vote_count') or 0), reverse=True)
+
+                position_total = sum(int(c.get('vote_count') or 0) for c in candidate_dicts)
+                results["total_votes"] += position_total
+
+                winner = candidate_dicts[0] if candidate_dicts and int(candidate_dicts[0].get('vote_count') or 0) > 0 else None
+                
+                results["positions"].append({
+                    "position": pos.to_dict(),
+                    "candidates": candidate_dicts,
+                    "total_votes": position_total,
+                    "winner": winner if winner else None
+                })
+            
+            # Handle unassigned candidates (legacy)
+            unassigned = session.query(Candidate).filter(
+                and_(
+                    Candidate.election_id == election_id,
+                    Candidate.position_id.is_(None)
+                )
+            ).all()
+            
+            if unassigned:
+                candidate_dicts = []
+                for c in unassigned:
+                    votes = vote_counts.get(c.candidate_id)
+                    if votes is None:
+                        votes = c.vote_count or 0
+                    d = c.to_dict()
+                    d['vote_count'] = int(votes)
+                    candidate_dicts.append(d)
+
+                candidate_dicts.sort(key=lambda x: int(x.get('vote_count') or 0), reverse=True)
+
+                position_total = sum(int(c.get('vote_count') or 0) for c in candidate_dicts)
+                results["total_votes"] += position_total
+                winner = candidate_dicts[0] if candidate_dicts and int(candidate_dicts[0].get('vote_count') or 0) > 0 else None
+                results["positions"].append({
+                    "position": {"position_id": None, "title": "General", "display_order": 999},
+                    "candidates": candidate_dicts,
+                    "total_votes": position_total,
+                    "winner": winner if winner else None
+                })
+            
+            return results
         finally:
             session.close()
     

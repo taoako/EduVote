@@ -11,9 +11,10 @@ class Candidate(Base):
 
     candidate_id = Column(Integer, primary_key=True, autoincrement=True)
     election_id = Column(Integer, ForeignKey('elections.election_id', ondelete='CASCADE'), nullable=False)
+    position_id = Column(Integer, ForeignKey('positions.position_id', ondelete='SET NULL'), nullable=True)
     user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE', onupdate='CASCADE'), nullable=True)
     full_name = Column(String(255), nullable=False)
-    position = Column(String(128), nullable=True)
+    position = Column(String(128), nullable=True)  # Legacy: text-based position (kept for backward compatibility)
     slogan = Column(Text)
     photo_path = Column(String(512))
     vote_count = Column(Integer, default=0)
@@ -21,6 +22,7 @@ class Candidate(Base):
 
     # Relationships
     election = relationship("Election", back_populates="candidates")
+    position_rel = relationship("Position", back_populates="candidates")
     user = relationship("User", back_populates="candidacies")
     votes = relationship("VotingRecord", back_populates="candidate")
 
@@ -32,6 +34,7 @@ class Candidate(Base):
         return {
             'candidate_id': self.candidate_id,
             'election_id': self.election_id,
+            'position_id': self.position_id,
             'user_id': self.user_id,
             'full_name': self.full_name,
             'position': self.position,

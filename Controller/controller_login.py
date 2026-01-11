@@ -11,6 +11,17 @@ class LoginController:
         self.dashboard = None
         self.view.login_btn.clicked.connect(self.handle_login)
 
+        # Optional: Forgot Password flow (if the view exposes the button)
+        if hasattr(self.view, "forgot_pass_btn"):
+            try:
+                self.view.forgot_pass_btn.clicked.connect(self._handle_forgot_password)
+            except Exception:
+                pass
+
+    def _handle_forgot_password(self):
+        if hasattr(self.view, "show_forgot_password_dialog"):
+            self.view.show_forgot_password_dialog(self.db.reset_password)
+
     @staticmethod
     def _normalize_user_data(user_data: dict | None) -> dict:
         """
@@ -32,8 +43,8 @@ class LoginController:
         student_id = self.view.get_student_id().strip()
         password = self.view.get_password()
 
-        if not username or not student_id or not password:
-            self.view.show_status("All fields are required!")
+        if not password or (not username and not student_id):
+            self.view.show_status("Enter your username or student ID, and password.")
             return
 
         success, user_data = self.db.authenticate_user(username, student_id, password)

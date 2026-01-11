@@ -326,11 +326,14 @@ class BarChart(QWidget):
         self.update()
 
     def paintEvent(self, event):
-        if not self._data:
-            return
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        if not self._data:
+            painter.setPen(QPen(QColor("#9CA3AF")))
+            painter.setFont(QFont("Segoe UI", 11))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No data available")
+            return
 
         w, h = self.width(), self.height()
         margin_left, margin_bottom = 50, 60

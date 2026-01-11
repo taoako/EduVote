@@ -5,15 +5,16 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QFont, QColor, QCursor
 from PyQt6.QtCore import Qt
-from Views.components import CircularImageAvatar, VotingModal
+from Views.components import CircularImageAvatar, VotingModal, BallotVotingModal
 
 
 class DashboardPage(QWidget):
     def __init__(self, user_data: dict = None):
         super().__init__()
         self.user_data = user_data or {}
-        self._blocks = []  # [{election:{}, candidates:[] }]
+        self._blocks = []  # [{election:{}, candidates:[], positions:[] }]
         self._vote_handler = None
+        self._ballot_vote_handler = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(30, 30, 30, 30)
@@ -50,7 +51,12 @@ class DashboardPage(QWidget):
 
     # ─── Public API ───────────────────────────────────────────────────
     def set_vote_handler(self, handler):
+        """Legacy single-vote handler."""
         self._vote_handler = handler
+
+    def set_ballot_vote_handler(self, handler):
+        """Ballot vote handler for multi-position voting."""
+        self._ballot_vote_handler = handler
 
     def set_elections(self, blocks: list):
         self._blocks = blocks or []
@@ -126,48 +132,104 @@ class DashboardPage(QWidget):
             dates.setStyleSheet("color: #6B7280; font-size: 12px;")
             cl.addWidget(dates)
 
+            # Positions info
+            positions = block.get('positions', [])
+            positions_count = len(positions)
+            if positions_count > 0:
+                ballot_status = election.get('ballot_status') or {}
+                total_positions = ballot_status.get('total_positions') or positions_count
+                voted_count = ballot_status.get('voted_count') or 0
+                pos_info = QLabel(f"📋 {voted_count}/{total_positions} positions completed")
+                pos_info.setStyleSheet("color: #10B981; font-size: 12px; font-weight: 600;")
+                cl.addWidget(pos_info)
+
             # action row
             btn_text = "Enter Voting" if status == 'active' else ("Voting opens soon" if status == 'upcoming' else "Voting ended")
             btn = QPushButton(btn_text)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setFixedHeight(40)
-            btn.setEnabled(status == 'active')
+            btn.setEnabled(status == 'active' and not election.get('user_voted'))
             btn.setStyleSheet("""
                 QPushButton { background: #10B981; color: white; border: none; border-radius: 18px; font-weight: 700; }
                 QPushButton:disabled { background: #E5E7EB; color: #9CA3AF; }
             """)
-            if status == 'active':
-                btn.clicked.connect(lambda checked=False, e=election, c=candidates: self._open_voting_modal(e, c))
+            if status == 'active' and not election.get('user_voted'):
+                btn.clicked.connect(lambda checked=False, e=election, c=candidates, p=positions: self._open_voting_modal(e, c, p))
             cl.addWidget(btn)
 
             # Voted indicator
-            voted_lbl = QLabel("Already voted")
-            voted_lbl.setStyleSheet("color: #16A34A; font-weight: 700;" if election.get('user_voted') else "color: #9CA3AF;")
+            voted_lbl = QLabel("✓ Already voted" if election.get('user_voted') else "")
+            voted_lbl.setStyleSheet("color: #16A34A; font-weight: 700;")
             voted_lbl.setVisible(bool(election.get('user_voted')))
             cl.addWidget(voted_lbl)
 
             self.list_layout.addWidget(card)
         self.list_layout.addStretch()
 
-    def _open_voting_modal(self, election: dict, candidates: list):
-        if not candidates:
-            QMessageBox.information(self, "No Candidates", "There are no candidates available for this election.")
-            return
-
+    def _open_voting_modal(self, election: dict, candidates: list, positions: list = None):
+        """Open the appropriate voting modal based on election structure."""
         title = election.get("title", "Election")
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        resolved = []
-        for c in candidates:
-            copy = dict(c)
-            photo = copy.get("photo_path")
-            if photo and not os.path.isabs(photo):
-                copy["photo_path"] = os.path.join(base_dir, photo)
-            resolved.append(copy)
 
-        modal = VotingModal(title, resolved, parent=self)
-        modal.vote_submitted.connect(lambda cid: self._on_vote_submitted(election.get('election_id'), cid))
-        modal.exec()
+        # Check if this election has positions (ballot-style voting)
+        if positions and len(positions) > 0:
+            # Ballot-style voting with multiple positions
+            positions_data = []
+            for pos_data in positions:
+                pos = pos_data.get('position', {})
+                pos_candidates = pos_data.get('candidates', [])
+                
+                # Resolve photo paths
+                resolved_candidates = []
+                for c in pos_candidates:
+                    copy = dict(c)
+                    photo = copy.get("photo_path")
+                    if photo and not os.path.isabs(photo):
+                        copy["photo_path"] = os.path.join(base_dir, photo)
+                    resolved_candidates.append(copy)
+                
+                if resolved_candidates:
+                    positions_data.append({
+                        "position": pos,
+                        "candidates": resolved_candidates
+                    })
+
+            if not positions_data:
+                QMessageBox.information(self, "No Candidates", "There are no candidates available for this election.")
+                return
+
+            voted_position_ids = (election or {}).get('voted_position_ids') or []
+            modal = BallotVotingModal(title, positions_data, voted_position_ids=voted_position_ids, parent=self)
+            modal.ballot_submitted.connect(lambda votes: self._on_ballot_submitted(election.get('election_id'), votes))
+            modal.exec()
+        else:
+            # Legacy single-vote modal (fallback for elections without positions)
+            if not candidates:
+                QMessageBox.information(self, "No Candidates", "There are no candidates available for this election.")
+                return
+
+            resolved = []
+            for c in candidates:
+                copy = dict(c)
+                photo = copy.get("photo_path")
+                if photo and not os.path.isabs(photo):
+                    copy["photo_path"] = os.path.join(base_dir, photo)
+                resolved.append(copy)
+
+            modal = VotingModal(title, resolved, parent=self)
+            modal.vote_submitted.connect(lambda cid: self._on_vote_submitted(election.get('election_id'), cid))
+            modal.exec()
 
     def _on_vote_submitted(self, election_id: int, candidate_id: int):
+        """Handle legacy single vote submission."""
         if self._vote_handler:
             self._vote_handler(election_id, candidate_id)
+
+    def _on_ballot_submitted(self, election_id: int, votes: list):
+        """Handle ballot submission with multiple position votes."""
+        if self._ballot_vote_handler:
+            self._ballot_vote_handler(election_id, votes)
+        elif self._vote_handler:
+            # Fallback: call vote handler for each position (legacy support)
+            for vote in votes:
+                self._vote_handler(election_id, vote.get('candidate_id'))
