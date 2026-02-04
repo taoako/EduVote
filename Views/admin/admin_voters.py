@@ -1,6 +1,4 @@
-"""
-Manage Voters Page - View and manage registered voters
-"""
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QGraphicsDropShadowEffect, QTableWidgetItem, QDialog,
