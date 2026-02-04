@@ -66,7 +66,7 @@ class AdminResultsPage(QWidget):
         self.selector = None
         self._chart_mode = "results"
         self._current_election_id: int | None = None
-        self._view_mode = "overall"  # overall | position_winner | position_tally
+        self._view_mode = "position_tally"  # overall | position_winner | position_tally
         self._positions_for_tally: list[dict] = []
         self._setup_ui()
         self._load_elections()
@@ -104,7 +104,10 @@ class AdminResultsPage(QWidget):
                 color: #111827;
                 background: #FFFFFF;
                 selection-background-color: #DBEAFE;
+                selection-color: #111827;
             }
+            QComboBox QAbstractItemView::item { padding: 6px 10px; }
+            QComboBox QAbstractItemView::item:selected { background: #DBEAFE; color: #111827; }
         """)
         self.selector.currentIndexChanged.connect(self._on_select_changed)
 
@@ -134,7 +137,10 @@ class AdminResultsPage(QWidget):
                 color: #111827;
                 background: #FFFFFF;
                 selection-background-color: #DBEAFE;
+                selection-color: #111827;
             }
+            QComboBox QAbstractItemView::item { padding: 6px 10px; }
+            QComboBox QAbstractItemView::item:selected { background: #DBEAFE; color: #111827; }
         """)
         self.view_combo.currentIndexChanged.connect(self._on_view_mode_changed)
 
@@ -186,7 +192,10 @@ class AdminResultsPage(QWidget):
                 color: #111827;
                 background: #FFFFFF;
                 selection-background-color: #DBEAFE;
+                selection-color: #111827;
             }
+            QComboBox QAbstractItemView::item { padding: 6px 10px; }
+            QComboBox QAbstractItemView::item:selected { background: #DBEAFE; color: #111827; }
         """)
         self.position_combo.currentIndexChanged.connect(self._on_position_selected)
 
@@ -198,6 +207,13 @@ class AdminResultsPage(QWidget):
         self.position_row_widget.setLayout(position_row)
         self.position_row_widget.setVisible(False)
         layout.addWidget(self.position_row_widget)
+
+        # Set default view AFTER position_row_widget exists to avoid early refresh errors.
+        default_view_idx = self.view_combo.findData("position_tally")
+        if default_view_idx >= 0:
+            self.view_combo.blockSignals(True)
+            self.view_combo.setCurrentIndex(default_view_idx)
+            self.view_combo.blockSignals(False)
 
         # Title row with status
         title_row = QHBoxLayout()
@@ -262,7 +278,10 @@ class AdminResultsPage(QWidget):
                 color: #111827;
                 background: #FFFFFF;
                 selection-background-color: #DBEAFE;
+                selection-color: #111827;
             }
+            QComboBox QAbstractItemView::item { padding: 6px 10px; }
+            QComboBox QAbstractItemView::item:selected { background: #DBEAFE; color: #111827; }
         """)
         self.chart_mode_combo.currentIndexChanged.connect(self._on_chart_mode_changed)
         bar_header.addWidget(self.chart_mode_combo)
@@ -350,22 +369,29 @@ class AdminResultsPage(QWidget):
                 status = election.get('status', 'active')
                 self.status_badge.set_status(status)
 
-                # Get candidates with aggregated votes from voting_records
+                # Get candidates with votes aggregated PER ELECTION (authoritative from voting_records).
+                # Also include position metadata so we can chart by position (avoids unreadable hundreds of bars).
                 cursor.execute(
                     """
-                    SELECT c.full_name,
-                           COALESCE(v.vote_total, c.vote_count, 0) AS votes
+                    SELECT
+                        c.candidate_id,
+                        c.full_name,
+                        c.position_id,
+                        COALESCE(p.title, 'General') AS position_title,
+                        COALESCE(p.display_order, 999) AS position_order,
+                        COALESCE(v.vote_total, c.vote_count, 0) AS votes
                     FROM candidates c
+                    LEFT JOIN positions p ON p.position_id = c.position_id
                     LEFT JOIN (
                         SELECT candidate_id, COUNT(*) AS vote_total
                         FROM voting_records
-                        WHERE candidate_id IS NOT NULL
+                        WHERE election_id = %s AND candidate_id IS NOT NULL AND status = 'cast'
                         GROUP BY candidate_id
                     ) v ON v.candidate_id = c.candidate_id
                     WHERE c.election_id = %s
                     ORDER BY votes DESC
                     """,
-                    (election['election_id'],),
+                    (election['election_id'], election['election_id']),
                 )
                 self._candidates = cursor.fetchall()
 
@@ -490,7 +516,7 @@ class AdminResultsPage(QWidget):
             self.chart_mode_combo.setEnabled(True)
             self.winner_banner.setVisible(True)
             # Restore overall table headers
-            self.table.clear()
+            self.table.clearContents()
             self.table.setColumnCount(4)
             self.table.setHorizontalHeaderLabels(["Rank", "Candidate", "Votes", "Percentage"])
             self._update_charts_for_mode()
@@ -512,6 +538,22 @@ class AdminResultsPage(QWidget):
             return
 
         positions = (self._position_results or {}).get('positions') or []
+        if not positions:
+            self.winner_banner.setVisible(False)
+            self.position_row_widget.setVisible(False)
+
+            self.bar_title.setText("No positions")
+            self.pie_title.setText("No positions")
+            self.bar_chart.set_data([])
+            self.pie_chart.set_data([])
+
+            self.table.clear()
+            self.table.setColumnCount(1)
+            self.table.setHorizontalHeaderLabels(["Info"])
+            self.table.setRowCount(1)
+            self.table.setItem(0, 0, QTableWidgetItem("This election has no positions to display."))
+            self.table.setRowHeight(0, 50)
+            return
         if mode == "position_winner":
             self._render_position_winners(positions)
         else:
@@ -667,14 +709,29 @@ class AdminResultsPage(QWidget):
             return
 
         if (self._chart_mode or "results") == "results":
-            self.bar_title.setText("Vote Distribution")
-            self.pie_title.setText("Vote Percentage")
+            self.bar_title.setText("Live Results by Position")
+            self.pie_title.setText("Live Results by Position")
 
-            # Use the already-loaded candidate rows for charts (keeps consistent with table).
-            chart_data = [
-                (c.get('full_name', '').split()[-1], int(c.get('votes') or 0))
-                for c in (self._candidates or [])
-            ]
+            # Chart one bar per position (leader only), not every candidate.
+            leaders: dict[str, dict] = {}
+            for c in (self._candidates or []):
+                pos_title = (c.get('position_title') or 'General').strip() or 'General'
+                votes = int(c.get('votes') or 0)
+                current = leaders.get(pos_title)
+                if current is None or votes > int(current.get('votes') or 0):
+                    leaders[pos_title] = c
+
+            # Sort by configured position order when available.
+            leader_rows = list(leaders.values())
+            leader_rows.sort(key=lambda r: (int(r.get('position_order') or 999), (r.get('position_title') or '').lower()))
+
+            chart_data = []
+            for r in leader_rows:
+                pos_title = (r.get('position_title') or 'General').strip() or 'General'
+                leader_last = (r.get('full_name') or '').split()[-1] if (r.get('full_name') or '').strip() else ''
+                label = f"{pos_title} — {leader_last}" if leader_last else pos_title
+                chart_data.append((label, int(r.get('votes') or 0)))
+
             self.bar_chart.set_data(chart_data)
             self.pie_chart.set_data(chart_data)
             return

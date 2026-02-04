@@ -2,6 +2,8 @@
 Manage Candidates Page - CRUD operations for candidates
 """
 import os
+import shutil
+import uuid
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QGridLayout,
     QGraphicsDropShadowEffect, QScrollArea, QDialog, QLineEdit,
@@ -10,8 +12,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QFont, QColor, QCursor, QPixmap
 from PyQt6.QtCore import Qt
 
-from .admin_components import GreenButton, ActionButton
+from .admin_components import GreenButton, ActionButton, SearchBar
 from Views.components import CircularImageAvatar
+from Models.validators import is_valid_optional_email
 from Controller.controller_candidates import (
     list_candidates,
     list_elections_options,
@@ -121,7 +124,6 @@ class CandidateDialog(QDialog):
             self.user_combo.view().setMinimumWidth(320)
         except Exception:
             pass
-        self.user_combo.currentIndexChanged.connect(self._on_user_changed)
         form_layout.addWidget(self.user_combo)
 
         # Name (read-only, mirrors selected user)
@@ -261,6 +263,12 @@ class CandidateDialog(QDialog):
         scroll.setWidget(form_widget)
         layout.addWidget(scroll, 1)
 
+        # Inline validation warning
+        self.warning_label = QLabel("")
+        self.warning_label.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: 600;")
+        self.warning_label.setVisible(False)
+        layout.addWidget(self.warning_label)
+
         # Pre-fill if editing
         if candidate:
             # Try to select matching user
@@ -308,12 +316,12 @@ class CandidateDialog(QDialog):
         """)
         cancel_btn.clicked.connect(self.reject)
 
-        save_btn = QPushButton("Save Candidate")
-        save_btn.setFixedHeight(50)
-        save_btn.setMinimumWidth(160)
-        save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        save_btn.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        save_btn.setStyleSheet("""
+        self.save_btn = QPushButton("Save Candidate")
+        self.save_btn.setFixedHeight(50)
+        self.save_btn.setMinimumWidth(160)
+        self.save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.save_btn.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        self.save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #10B981;
                 color: white;
@@ -325,12 +333,20 @@ class CandidateDialog(QDialog):
                 background-color: #059669;
             }
         """)
-        save_btn.clicked.connect(self.accept)
+        self.save_btn.clicked.connect(self.accept)
 
         btn_row.addStretch()
         btn_row.addWidget(cancel_btn)
-        btn_row.addWidget(save_btn)
+        btn_row.addWidget(self.save_btn)
         layout.addLayout(btn_row)
+
+        # Live validation
+        self.user_combo.currentIndexChanged.connect(self._on_user_changed)
+        self.user_combo.currentIndexChanged.connect(self._validate_form)
+        self.election_combo.currentIndexChanged.connect(self._validate_form)
+        self.position_input.textChanged.connect(self._validate_form)
+        self.email_input.textChanged.connect(self._validate_form)
+        self._validate_form()
 
     def _choose_photo(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -338,8 +354,25 @@ class CandidateDialog(QDialog):
             "Images (*.png *.jpg *.jpeg *.bmp)"
         )
         if file_path:
-            self.photo_path = file_path
-            self.photo_label.setText(os.path.basename(file_path))
+            # Copy into project Assets so paths are portable across users/machines.
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            dest_dir = os.path.join(base_dir, "Assets", "candidate_photos")
+            os.makedirs(dest_dir, exist_ok=True)
+
+            _, ext = os.path.splitext(file_path)
+            ext = ext or ".png"
+            dest_name = f"{uuid.uuid4().hex}{ext.lower()}"
+            dest_abs = os.path.join(dest_dir, dest_name)
+            try:
+                shutil.copy2(file_path, dest_abs)
+                # Store relative path in DB
+                self.photo_path = os.path.join("Assets", "candidate_photos", dest_name)
+                self.photo_label.setText(dest_name)
+            except Exception:
+                # Fallback: keep original absolute path if copy fails
+                self.photo_path = file_path
+                self.photo_label.setText(os.path.basename(file_path))
+        self._validate_form()
 
     def get_data(self) -> dict:
         selected_election = self.election_combo.currentData()
@@ -365,13 +398,33 @@ class CandidateDialog(QDialog):
                 self.name_input.setText(match.get('full_name', ''))
         else:
             self.name_input.clear()
+        self._validate_form()
 
     def accept(self):
-        email = (self.email_input.text() or "").strip()
-        if email and "@" not in email:
-            QMessageBox.warning(self, "Invalid Email", "Email must contain '@'.")
+        if not self._validate_form():
             return
         super().accept()
+
+    def _validate_form(self) -> bool:
+        message = None
+        if not self.user_combo.currentData():
+            message = "Select a user to create a candidate."
+        elif not self.name_input.text().strip():
+            message = "Full name is required."
+        elif not self.election_combo.currentData():
+            message = "Select an election."
+        elif not (self.photo_path or "").strip():
+            message = "Choose a candidate photo."
+        else:
+            email = (self.email_input.text() or "").strip()
+            if not is_valid_optional_email(email):
+                message = "Please enter a valid email address (example: name@school.com)."
+
+        self.warning_label.setVisible(bool(message))
+        if message:
+            self.warning_label.setText(f"⚠ {message}")
+        self.save_btn.setEnabled(message is None)
+        return message is None
 
 
 class CandidateCard(QFrame):
@@ -409,7 +462,8 @@ class CandidateCard(QFrame):
             base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             photo = os.path.join(base, photo)
 
-        avatar = CircularImageAvatar(photo, candidate.get('full_name', '?')[0], size=100)
+        full_name = str(candidate.get('full_name') or '?')
+        avatar = CircularImageAvatar(photo, full_name[:1], size=100)
         layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Name
@@ -457,6 +511,7 @@ class ManageCandidatesPage(QWidget):
 
     def __init__(self):
         super().__init__()
+        self._all_candidates = []
         self._candidates = []
         self._elections = []
         self._setup_ui()
@@ -494,6 +549,13 @@ class ManageCandidatesPage(QWidget):
         header_row.addWidget(add_btn)
         card_layout.addLayout(header_row)
 
+        # Search row
+        search_row = QHBoxLayout()
+        self.search_input = SearchBar("Search candidates")
+        self.search_input.textChanged.connect(self._apply_filter)
+        search_row.addWidget(self.search_input, 1)
+        card_layout.addLayout(search_row)
+
         # Scrollable grid
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -514,10 +576,32 @@ class ManageCandidatesPage(QWidget):
         """Load candidates and elections from database"""
         try:
             self._elections = list_elections_options()
-            self._candidates = list_candidates()
-            self._populate_grid()
+            self._all_candidates = list_candidates() or []
+            self._apply_filter()
         except Exception as e:
             print(f"Load candidates error: {e}")
+
+    def _apply_filter(self):
+        term = (self.search_input.text() if hasattr(self, "search_input") else "")
+        term = (term or "").strip().lower()
+        if not term:
+            self._candidates = list(self._all_candidates)
+            self._populate_grid()
+            return
+
+        def _match(candidate: dict) -> bool:
+            hay = " ".join(
+                [
+                    str(candidate.get("full_name") or ""),
+                    str(candidate.get("slogan") or ""),
+                    str(candidate.get("position") or ""),
+                    str(candidate.get("election_title") or ""),
+                ]
+            ).lower()
+            return term in hay
+
+        self._candidates = [c for c in self._all_candidates if _match(c)]
+        self._populate_grid()
 
     def _populate_grid(self):
         # Clear existing
@@ -545,11 +629,7 @@ class ManageCandidatesPage(QWidget):
         dialog = CandidateDialog(self, elections=self._elections)
         if dialog.exec():
             data = dialog.get_data()
-            if not data['full_name']:
-                QMessageBox.warning(self, "Error", "Name is required")
-                return
-            if not data['election_ids']:
-                QMessageBox.warning(self, "Error", "Select at least one election")
+            if not data['full_name'] or not data['election_ids'] or not (data.get('photo_path') or '').strip():
                 return
 
             ok, msg = create_candidate(data)
@@ -563,7 +643,6 @@ class ManageCandidatesPage(QWidget):
         if dialog.exec():
             data = dialog.get_data()
             if not data['election_ids']:
-                QMessageBox.warning(self, "Error", "Select at least one election")
                 return
             ok, msg = update_candidate(candidate['candidate_id'], data)
             if not ok:

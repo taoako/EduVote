@@ -89,6 +89,7 @@ class DashboardPage(QWidget):
                 item.widget().deleteLater()
 
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        shown = 0
         for block in self._blocks:
             election = block.get('election', {})
             candidates = block.get('candidates', [])
@@ -97,7 +98,7 @@ class DashboardPage(QWidget):
                 continue
             if self._filter == 'upcoming' and status != 'upcoming':
                 continue
-            if self._filter == 'ended' and status not in ('finalized', 'closed'): 
+            if self._filter == 'ended' and status not in ('finalized', 'closed', 'ended'): 
                 continue
 
             card = QFrame()
@@ -120,8 +121,15 @@ class DashboardPage(QWidget):
             hrow.addWidget(title)
 
             status_chip = QLabel(status.upper())
-            status_chip.setStyleSheet("""
-                QLabel { padding: 6px 10px; border-radius: 12px; color: #0F5132; background: #D1FAE5; font-weight: 700; }
+            status_key = (status or "").strip().lower()
+            if status_key in ("finalized", "ended", "closed"):
+                chip_bg, chip_fg = "#FEE2E2", "#B91C1C"
+            elif status_key == "upcoming":
+                chip_bg, chip_fg = "#DBEAFE", "#1D4ED8"
+            else:
+                chip_bg, chip_fg = "#D1FAE5", "#0F5132"
+            status_chip.setStyleSheet(f"""
+                QLabel {{ padding: 6px 10px; border-radius: 12px; color: {chip_fg}; background: {chip_bg}; font-weight: 700; }}
             """)
             hrow.addStretch()
             hrow.addWidget(status_chip)
@@ -164,6 +172,13 @@ class DashboardPage(QWidget):
             cl.addWidget(voted_lbl)
 
             self.list_layout.addWidget(card)
+            shown += 1
+
+        if shown == 0:
+            empty = QLabel("No elections to show.")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet("color: #6B7280; font-size: 13px;")
+            self.list_layout.addWidget(empty)
         self.list_layout.addStretch()
 
     def _open_voting_modal(self, election: dict, candidates: list, positions: list = None):

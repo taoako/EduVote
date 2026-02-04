@@ -328,29 +328,45 @@ class ResultsPage(QWidget):
         self.badge.setText(f" {status} ")
         self.badge.setStyleSheet(f"background-color: {status_bg}; color: {status_fg}; border-radius: 8px; padding: 4px 12px;")
         
-        # Find overall top winner (from first position typically)
-        overall_winner = None
         total_positions = len(position_results)
-        
-        if position_results and position_results[0].get("candidates"):
-            first_pos_candidates = position_results[0]["candidates"]
-            if first_pos_candidates:
-                overall_winner = first_pos_candidates[0]  # Already sorted by votes
-        
-        if overall_winner:
+
+        has_any_candidates = any((p.get("candidates") or []) for p in position_results)
+        if not has_any_candidates:
+            self.winner_name.setText("No candidates yet")
+            self.winner_votes.setText("")
+            if self.avatar_widget:
+                self.banner_layout.removeWidget(self.avatar_widget)
+                self.avatar_widget.deleteLater()
+                self.avatar_widget = None
+
+            self._clear_layout(self.results_container)
+            msg = QLabel("No candidates have been assigned to positions for this election yet.")
+            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            msg.setStyleSheet("color: #6B7280; font-size: 13px; margin-top: 10px;")
+            self.results_container.addWidget(msg)
+            return
+
+        # Find overall top winner across all positions by vote_count
+        all_candidates = []
+        for p in position_results:
+            all_candidates.extend(p.get("candidates") or [])
+        all_candidates_sorted = sorted(all_candidates, key=lambda c: int(c.get("vote_count", 0) or 0), reverse=True)
+        overall_winner = all_candidates_sorted[0] if all_candidates_sorted else None
+
+        if overall_winner and int(overall_winner.get("vote_count", 0) or 0) > 0:
             photo = overall_winner.get("photo_path")
             if photo and not os.path.isabs(photo):
                 base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                 photo = os.path.join(base, photo)
-            self._set_avatar(photo, overall_winner.get("full_name", "?")[0:1])
+            self._set_avatar(photo, (overall_winner.get("full_name", "?") or "?")[0:1])
             self.winner_name.setText(f"{overall_winner.get('full_name', 'Unknown')}")
-            pos_title = position_results[0].get("position", {}).get("title", "")
-            self.winner_votes.setText(f"{pos_title} • {overall_winner.get('vote_count', 0)} votes")
+            self.winner_votes.setText(f"{overall_winner.get('vote_count', 0)} votes")
         else:
             self.winner_name.setText("No votes yet")
-            self.winner_votes.setText("")
+            self.winner_votes.setText("Results will appear after votes are cast.")
             if self.avatar_widget:
-                self.avatar_widget.setParent(None)
+                self.banner_layout.removeWidget(self.avatar_widget)
+                self.avatar_widget.deleteLater()
                 self.avatar_widget = None
         
         self._clear_layout(self.results_container)

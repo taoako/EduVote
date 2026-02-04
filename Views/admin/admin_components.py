@@ -68,6 +68,8 @@ class StatCard(QFrame):
         super().__init__()
         self.setFixedHeight(140)
         self.setMinimumWidth(240)
+        self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         # Keep StatCards consistent with the project's light theme
         bg_color = "#FFFFFF"
@@ -433,11 +435,14 @@ class PieChart(QWidget):
         self.update()
 
     def paintEvent(self, event):
-        if not self._data:
-            return
-
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        if not self._data:
+            painter.setPen(QPen(QColor("#9CA3AF")))
+            painter.setFont(QFont("Segoe UI", 11))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No data available")
+            return
 
         w, h = self.width(), self.height()
 

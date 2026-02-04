@@ -1,7 +1,7 @@
 """
 Election Model - SQLAlchemy ORM model for elections table.
 """
-from sqlalchemy import Column, Integer, String, Text, Enum, Date, TIMESTAMP
+from sqlalchemy import Column, Integer, String, Text, Enum, Date, TIMESTAMP, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from Models.base import Base
@@ -15,6 +15,7 @@ class Election(Base):
     title = Column(String(255), nullable=False)
     description = Column(Text)
     status = Column(Enum('upcoming', 'active', 'finalized'), default='upcoming')
+    status_locked = Column(Boolean, default=False)
     start_date = Column(Date)
     end_date = Column(Date)
     allowed_grade = Column(Integer, default=None)  # 11, 12, or None for all
@@ -63,6 +64,7 @@ class Election(Base):
             'title': self.title,
             'description': self.description,
             'status': self.status,
+            'status_locked': bool(getattr(self, "status_locked", False)),
             'start_date': self.start_date,
             'end_date': self.end_date,
             'allowed_grade': self.allowed_grade,

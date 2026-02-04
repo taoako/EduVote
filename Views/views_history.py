@@ -57,13 +57,42 @@ class HistoryPage(QWidget):
 
     def set_history(self, rows):
         self.rows = rows or []
+
+        if not self.rows:
+            self.table.clearContents()
+            try:
+                self.table.clearSpans()
+            except Exception:
+                pass
+            self.table.setRowCount(1)
+            self.table.setSpan(0, 0, 1, 4)
+            msg = QTableWidgetItem("No voting activity yet.")
+            msg.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            msg.setForeground(QColor("#6B7280"))
+            self.table.setItem(0, 0, msg)
+            self.table.setRowHeight(0, 60)
+            return
+
+        try:
+            self.table.clearSpans()
+        except Exception:
+            pass
         self.table.setRowCount(len(self.rows))
 
         for row_idx, entry in enumerate(self.rows):
             date = entry.get("voted_at", "-")
             election_title = entry.get("election_title", "-")
-            candidate_name = entry.get("candidate_name") or "Unknown candidate"
-            status = (entry.get("status", "cast") or "cast").capitalize()
+            raw_status = (entry.get("status", "cast") or "cast")
+            status_key = str(raw_status).lower()
+
+            if status_key == "spoiled":
+                status = "Abstained"
+                candidate_name = "Abstained"
+                voted_text = "User abstained from voting"
+            else:
+                status = "Casted" if status_key == "cast" else str(raw_status).capitalize()
+                candidate_name = entry.get("candidate_name") or "Abstained"
+                voted_text = f"Voted for: {candidate_name}"
 
             self.table.setItem(row_idx, 0, QTableWidgetItem(str(date)))
             self.table.setItem(row_idx, 1, QTableWidgetItem(str(election_title)))
@@ -73,18 +102,18 @@ class HistoryPage(QWidget):
             l.setContentsMargins(4, 6, 4, 6)
             l.setSpacing(10)
             l.addWidget(CircularAvatar("#10B981", str(candidate_name)[0], 30))
-            voted_lbl = QLabel(f"Voted for: {candidate_name}")
+            voted_lbl = QLabel(voted_text)
             voted_lbl.setStyleSheet("color: #111827; font-weight: 600;")
             l.addWidget(voted_lbl)
             l.addStretch()
             self.table.setCellWidget(row_idx, 2, cell_widget)
 
-            badge = QLabel(f" {status} " + ("✅" if status.lower() == "cast" else ""))
+            badge = QLabel(f" {status} " + ("✅" if status.lower() == "casted" else ""))
             badge.setFixedHeight(28)
             badge.setMinimumWidth(110)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             # Render as a subtle badge (not button-like)
-            is_cast = status.lower() == "cast"
+            is_cast = status.lower() == "casted"
             fg = "#059669" if is_cast else "#6B7280"
             border = "#A7F3D0" if is_cast else "#E5E7EB"
             badge.setStyleSheet(

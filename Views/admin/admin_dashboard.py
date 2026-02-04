@@ -1,13 +1,17 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
-    QScrollArea, QGraphicsDropShadowEffect, QSizePolicy, QComboBox
+    QScrollArea, QGraphicsDropShadowEffect, QSizePolicy, QPushButton, QDialog
 )
 from PyQt6.QtGui import QFont, QColor
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 
 from .admin_components import StatCard, BarChart
-from Controller.controller_elections import get_admin_stats, get_recent_activity, get_dashboard_chart_data
+from Controller.controller_elections import (
+    get_admin_stats,
+    get_dashboard_chart_data,
+)
+from Controller.controller_audit_log import get_recent_activity
 
 
 class ActivityItem(QFrame):
@@ -80,25 +84,63 @@ class RecentActivityPanel(QFrame):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        title = QLabel("Recent Activity:")
+        title_row = QHBoxLayout()
+        title = QLabel("Audit Logs:")
         title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         title.setStyleSheet("color: #111827;")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
 
-        self.activity_layout = QVBoxLayout()
+        self.view_all_btn = QPushButton("View All")
+        self.view_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.view_all_btn.setFixedHeight(30)
+        self.view_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #10B981;
+                border: 1px solid #10B981;
+                border-radius: 12px;
+                padding: 4px 10px;
+                font-weight: 600;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #ECFDF5;
+            }
+        """)
+        title_row.addWidget(self.view_all_btn)
+        layout.addLayout(title_row)
+        # Scrollable activity list to keep panel compact
+        self.activity_scroll = QScrollArea()
+        self.activity_scroll.setWidgetResizable(True)
+        self.activity_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.activity_scroll.setStyleSheet("background: transparent;")
+        self.activity_scroll.setFixedHeight(320)
+
+        self.activity_container = QWidget()
+        self.activity_layout = QVBoxLayout(self.activity_container)
+        self.activity_layout.setContentsMargins(0, 0, 0, 0)
         self.activity_layout.setSpacing(8)
-        layout.addLayout(self.activity_layout)
-        layout.addStretch()
+        self.activity_layout.addStretch(1)
+
+        self.activity_scroll.setWidget(self.activity_container)
+        layout.addWidget(self.activity_scroll)
 
     def add_activity(self, text: str, time_ago: str, date_text: str | None = None):
         item = ActivityItem(text, time_ago, date_text=date_text)
-        self.activity_layout.addWidget(item)
+        # Insert before the stretch
+        self.activity_layout.insertWidget(max(0, self.activity_layout.count() - 1), item)
 
     def clear_activities(self):
         while self.activity_layout.count():
             child = self.activity_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+        # Restore stretch at bottom
+        self.activity_layout.addStretch(1)
+
+    def set_view_all_handler(self, handler):
+        self.view_all_btn.clicked.connect(handler)
 
 
 class AdminDashboardPage(QWidget):
@@ -113,7 +155,7 @@ class AdminDashboardPage(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(20)
+        layout.setSpacing(16)
 
         # Stats row
         stats_row = QHBoxLayout()
@@ -160,36 +202,19 @@ class AdminDashboardPage(QWidget):
         # Chart mode selector
         mode_row = QHBoxLayout()
         mode_row.addStretch(1)
-        self.chart_mode_combo = QComboBox()
-        self.chart_mode_combo.addItem("Live Results", "results")
-        self.chart_mode_combo.addItem("Turnout by Position", "position_turnout")
-        self.chart_mode_combo.addItem("Turnout by Grade/Section (%)", "grade_section_turnout")
-        self.chart_mode_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #FFFFFF;
-                border: 1px solid #E5E7EB;
-                border-radius: 10px;
-                padding: 6px 10px;
-                color: #111827;
-                font-size: 12px;
-                font-family: 'Segoe UI';
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 24px;
-            }
-        """)
-        self.chart_mode_combo.currentIndexChanged.connect(self._on_chart_mode_changed)
-        mode_row.addWidget(self.chart_mode_combo)
+
+        # No dropdowns here (keeps dashboard clean). Always show live results by position.
         chart_layout.addLayout(mode_row)
 
         self.bar_chart = BarChart()
+        self.bar_chart.setMinimumHeight(260)
         chart_layout.addWidget(self.bar_chart, 1)
 
         content_row.addWidget(chart_card, 2)
 
         # Recent activity
         self.activity_panel = RecentActivityPanel()
+        self.activity_panel.set_view_all_handler(self._open_audit_log_dialog)
         content_row.addWidget(self.activity_panel, 1)
 
         layout.addLayout(content_row, 1)
@@ -207,39 +232,113 @@ class AdminDashboardPage(QWidget):
             # Get chart data from controller
             self._load_chart()
 
-            # Get recent activity from controller
+            # Get audit activity from controller
             self.activity_panel.clear_activities()
-            activities = get_recent_activity(5)
+            activities = get_recent_activity(8)
+            if not activities:
+                self.activity_panel.add_activity("System: No audit logs yet.", "", date_text="")
+
             for row in activities:
-                voted_at = row.get('voted_at')
+                created_at = row.get('created_at')
                 try:
-                    date_text = voted_at.strftime('%Y-%m-%d %H:%M') if hasattr(voted_at, 'strftime') else str(voted_at or '')
+                    date_text = created_at.strftime('%Y-%m-%d %H:%M') if hasattr(created_at, 'strftime') else str(created_at or '')
                 except Exception:
-                    date_text = str(voted_at or '')
-                self.activity_panel.add_activity(
-                    f"{row['full_name']}: voted in {row['election_title']}",
-                    "recently",
-                    date_text=date_text
-                )
+                    date_text = str(created_at or '')
+
+                user_name = row.get("user_name") or "System"
+                action = row.get("action") or "Activity"
+                details = row.get("details") or ""
+                message = f"{user_name}: {action}" if not details else f"{user_name}: {action} — {details}"
+
+                self.activity_panel.add_activity(message, "recently", date_text=date_text)
 
         except Exception as e:
             print(f"Dashboard load error: {e}")
             # Show placeholder data
-            self.activity_panel.add_activity("Student: Voted Mang Kanor", "2 hours ago", date_text="")
-            self.activity_panel.add_activity("Student: Voted Mang Kanor", "2 hours ago", date_text="")
-            self.activity_panel.add_activity("Student: Voted Mang Kanor", "2 hours ago", date_text="")
+            self.activity_panel.add_activity("System: Audit logs are unavailable.", "", date_text="")
 
             self.bar_chart.set_data([
                 ("Item 1", 7), ("Item 2", 11), ("Item 3", 15),
                 ("Item 4", 18), ("Item 5", 20), ("Item 6", 22)
             ])
 
-    def _on_chart_mode_changed(self, _index: int):
-        self._chart_mode = self.chart_mode_combo.currentData() or "results"
-        self._load_chart()
+    def _open_audit_log_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("All Audit Logs")
+        dialog.setMinimumSize(680, 520)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("All Audit Logs")
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title.setStyleSheet("color: #111827;")
+        layout.addWidget(title)
+
+        loading = QLabel("Loading audit logs...")
+        loading.setStyleSheet("color: #6B7280; font-size: 12px;")
+        layout.addWidget(loading)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background: transparent;")
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+
+        def _load_logs():
+            logs = get_recent_activity(None)
+            loading.setVisible(False)
+
+            if not logs:
+                empty = QLabel("No audit logs found.")
+                empty.setStyleSheet("color: #6B7280; font-size: 12px;")
+                content_layout.addWidget(empty)
+            else:
+                for row in logs:
+                    created_at = row.get("created_at")
+                    try:
+                        date_text = created_at.strftime('%Y-%m-%d %H:%M') if hasattr(created_at, 'strftime') else str(created_at or '')
+                    except Exception:
+                        date_text = str(created_at or '')
+
+                    user_name = row.get("user_name") or "System"
+                    action = row.get("action") or "Activity"
+                    details = row.get("details") or ""
+                    message = f"{user_name}: {action}" if not details else f"{user_name}: {action} — {details}"
+
+                    content_layout.addWidget(ActivityItem(message, "", date_text=date_text))
+
+            content_layout.addStretch(1)
+
+        QTimer.singleShot(50, _load_logs)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(34)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #10B981;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 6px 16px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #059669; }
+        """)
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        dialog.exec()
 
     def _load_chart(self):
-        chart_info = get_dashboard_chart_data(self._chart_mode)
+        chart_info = get_dashboard_chart_data("results")
         self.chart_title.setText(chart_info.get('title', 'Dashboard'))
         self.bar_chart.set_data(chart_info.get('data', []))
 

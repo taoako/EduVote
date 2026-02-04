@@ -19,6 +19,7 @@ from Controller.controller_voters import (
 from Controller.controller_elections import get_election_results
 from Controller.controller_candidates import get_candidates_for_election
 from Models.model_db import Database
+from Models.validators import is_valid_optional_email
 
 
 class MainWindow(QMainWindow):
@@ -165,6 +166,14 @@ class MainWindow(QMainWindow):
         self.switch_page(0)
 
     def _handle_logout(self):
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Log out",
+            "Are you sure you want to log out?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
         if callable(self.on_logout):
             self.on_logout()
         else:
@@ -219,8 +228,8 @@ class MainWindow(QMainWindow):
             new_pwd = pwd_edit.text().strip()
 
             email_val = (email_edit.text() or "").strip()
-            if email_val and "@" not in email_val:
-                QMessageBox.warning(self, "Invalid Email", "Email must contain '@'.")
+            if not is_valid_optional_email(email_val):
+                QMessageBox.warning(self, "Invalid Email", "Please enter a valid email address (example: name@school.com).")
                 return
 
             success, msg = update_user_profile(

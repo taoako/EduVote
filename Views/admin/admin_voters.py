@@ -10,6 +10,7 @@ from PyQt6.QtGui import QFont, QColor, QCursor
 from PyQt6.QtCore import Qt
 
 from .admin_components import GreenButton, SearchBar, DataTable, StatusBadge, ActionButton, StatCard
+from Models.validators import is_valid_optional_email
 from Controller.controller_voters import (
     list_voters_with_status,
     create_voter,
@@ -229,6 +230,12 @@ class VoterDialog(QDialog):
 
         # add scroll area to outer layout done above
 
+        # Inline validation warning
+        self.warning_label = QLabel("")
+        self.warning_label.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: 600;")
+        self.warning_label.setVisible(False)
+        outer_layout.addWidget(self.warning_label)
+
         # Buttons
         btn_row = QHBoxLayout()
         btn_row.setSpacing(15)
@@ -254,12 +261,12 @@ class VoterDialog(QDialog):
         """)
         cancel_btn.clicked.connect(self.reject)
 
-        save_btn = QPushButton("Save Voter")
-        save_btn.setFixedHeight(46)
-        save_btn.setMinimumWidth(150)
-        save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        save_btn.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        save_btn.setStyleSheet("""
+        self.save_btn = QPushButton("Save Voter")
+        self.save_btn.setFixedHeight(46)
+        self.save_btn.setMinimumWidth(150)
+        self.save_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.save_btn.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        self.save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #10B981;
                 color: white;
@@ -271,12 +278,23 @@ class VoterDialog(QDialog):
                 background-color: #059669;
             }
         """)
-        save_btn.clicked.connect(self.accept)
+        self.save_btn.clicked.connect(self.accept)
 
         btn_row.addStretch()
         btn_row.addWidget(cancel_btn)
-        btn_row.addWidget(save_btn)
+        btn_row.addWidget(self.save_btn)
         outer_layout.addLayout(btn_row)
+
+        # Live validation
+        self.name_input.textChanged.connect(self._validate_form)
+        self.student_id_input.textChanged.connect(self._validate_form)
+        self.email_input.textChanged.connect(self._validate_form)
+        self.password_input.textChanged.connect(self._validate_form)
+        self.grade_combo.currentIndexChanged.connect(self._validate_form)
+        self.section_combo.currentIndexChanged.connect(self._validate_form)
+        self.new_grade_input.textChanged.connect(self._validate_form)
+        self.new_section_input.textChanged.connect(self._validate_form)
+        self._validate_form()
 
     def get_data(self) -> dict:
         grade_level = None
@@ -303,11 +321,50 @@ class VoterDialog(QDialog):
         }
 
     def accept(self):
-        email = (self.email_input.text() or "").strip()
-        if email and "@" not in email:
-            QMessageBox.warning(self, "Invalid Email", "Email must contain '@'.")
+        if not self._validate_form():
             return
         super().accept()
+
+    def _validate_form(self) -> bool:
+        message = None
+        name = self.name_input.text().strip()
+        student_id = self.student_id_input.text().strip()
+        email = (self.email_input.text() or "").strip()
+        password = self.password_input.text() if not self.voter else self.password_input.text()
+
+        if not name:
+            message = "Full name is required."
+        elif not student_id:
+            message = "Student ID is required."
+        elif not email:
+            message = "Email is required."
+        elif not is_valid_optional_email(email):
+            message = "Please enter a valid email address (example: name@school.com)."
+        elif not self.voter and not password:
+            message = "Password is required for new voters."
+
+        if message is None:
+            if self.adding_new_section:
+                grade_val = (self.new_grade_input.text() or "").strip()
+                section_val = (self.new_section_input.text() or "").strip()
+                if not grade_val or not section_val:
+                    message = "Grade level and section are required."
+                else:
+                    try:
+                        int(grade_val)
+                    except Exception:
+                        message = "Grade level must be a number."
+            else:
+                if self.grade_combo.currentData() is None:
+                    message = "Select a grade level."
+                elif self.section_combo.currentData() is None:
+                    message = "Select a section."
+
+        self.warning_label.setVisible(bool(message))
+        if message:
+            self.warning_label.setText(f"⚠ {message}")
+        self.save_btn.setEnabled(message is None)
+        return message is None
 
     def _populate_grade_options(self):
         self.grade_combo.blockSignals(True)
@@ -340,6 +397,7 @@ class VoterDialog(QDialog):
         self.grade_combo.setEnabled(not self.adding_new_section)
         self.section_combo.setEnabled(not self.adding_new_section)
         self.add_section_btn.setText("Cancel new section" if self.adding_new_section else "Add new grade/section")
+        self._validate_form()
 
     def _prefill_grade_section(self, grade_level, section_name):
         if grade_level is not None and not any(s.get('grade_level') == grade_level for s in self.sections):
@@ -507,7 +565,6 @@ class ManageVotersPage(QWidget):
                 try:
                     grade_val = int(new_section.get('grade_level'))
                 except Exception:
-                    QMessageBox.warning(self, "Error", "Grade level must be a number when adding a new section.")
                     return
                 ok, msg = add_section(grade_val, new_section.get('section_name'))
                 if not ok:
@@ -516,7 +573,6 @@ class ManageVotersPage(QWidget):
                 data['grade_level'] = grade_val
                 data['section'] = new_section.get('section_name')
             if not data['full_name'] or not data['email'] or not data['password']:
-                QMessageBox.warning(self, "Error", "Name, email and password are required")
                 return
             success, msg = create_voter(data)
             if success:
@@ -537,7 +593,6 @@ class ManageVotersPage(QWidget):
                 try:
                     grade_val = int(new_section.get('grade_level'))
                 except Exception:
-                    QMessageBox.warning(self, "Error", "Grade level must be a number when adding a new section.")
                     return
                 ok, msg = add_section(grade_val, new_section.get('section_name'))
                 if not ok:

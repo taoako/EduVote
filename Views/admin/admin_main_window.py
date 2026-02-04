@@ -3,7 +3,7 @@ Admin Main Window - Main container for admin panel with sidebar navigation
 """
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFrame, QLabel,
-    QPushButton, QStackedWidget, QGraphicsDropShadowEffect, QMenu
+    QPushButton, QStackedWidget, QGraphicsDropShadowEffect, QMenu, QMessageBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QColor, QCursor, QPixmap
@@ -191,6 +191,14 @@ class AdminMainWindow(QMainWindow):
             current_page.refresh()
 
     def _handle_logout(self):
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Log out",
+            "Are you sure you want to log out?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
         if callable(self.on_logout):
             self.on_logout()
         else:

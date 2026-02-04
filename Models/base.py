@@ -60,6 +60,7 @@ def init_db():
     from Models.model_section import Section
     from Models.model_voting_record import VotingRecord
     from Models.model_position import Position
+    from Models.model_audit_log import AuditLog
     
     Base.metadata.create_all(bind=engine)
     
@@ -93,6 +94,7 @@ def _run_migrations():
             "ALTER TABLE candidates ADD COLUMN created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP",
             "ALTER TABLE candidates ADD COLUMN position VARCHAR(128) DEFAULT NULL",
             "ALTER TABLE candidates ADD COLUMN position_id INT NULL AFTER election_id",
+            "ALTER TABLE elections ADD COLUMN status_locked TINYINT(1) DEFAULT 0",
         ]
         
         for migration in migrations:
@@ -100,6 +102,22 @@ def _run_migrations():
                 session.execute(text(migration))
             except Exception:
                 pass
+
+        # Audit logs table
+        try:
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    log_id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NULL,
+                    action VARCHAR(128) NOT NULL,
+                    details TEXT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_audit_created_at (created_at),
+                    INDEX idx_audit_user_id (user_id)
+                )
+            """))
+        except Exception:
+            pass
 
         # Ensure voting_records uniqueness is per user/election/position
         # (Older schemas often had a unique index on (user_id, election_id), which breaks ballot voting.)

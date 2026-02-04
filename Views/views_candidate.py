@@ -31,11 +31,18 @@ class CandidateCard(QFrame):
 
         # Avatar
         photo = candidate.get("photo_path")
-        if photo and not os.path.isabs(photo):
-            base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            photo = os.path.join(base, photo)
-        
-        avatar = CircularImageAvatar(photo, candidate.get("full_name", "?")[0], size=100)
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if photo and not os.path.isabs(str(photo)):
+            photo = os.path.join(base, str(photo))
+
+        # Fallback placeholder image for candidates without photos
+        if not photo or not os.path.exists(str(photo)):
+            placeholder = os.path.join(base, "Assets", "lam.png")
+            if os.path.exists(placeholder):
+                photo = placeholder
+
+        full_name = str(candidate.get("full_name") or "?")
+        avatar = CircularImageAvatar(photo, full_name[:1], size=100)
         layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Name

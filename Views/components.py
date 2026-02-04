@@ -17,10 +17,42 @@ class CircularImageAvatar(QLabel):
         self._fallback_color = QColor(fallback_color)
         self._pixmap = None
 
-        if image_path and os.path.exists(image_path):
-            pm = QPixmap(image_path)
+        resolved = self._resolve_image_path(image_path)
+        if resolved:
+            pm = QPixmap(resolved)
             if not pm.isNull():
-                self._pixmap = pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                self._pixmap = pm.scaled(
+                    size,
+                    size,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+
+    def _resolve_image_path(self, image_path: str | None) -> str | None:
+        if not image_path:
+            return None
+
+        path = os.path.normpath(str(image_path))
+        if os.path.exists(path):
+            return path
+
+        # Project root (../ from Views)
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        # Handle "root-relative" paths without a drive on Windows, e.g. "\\Assets\\x.png" or "/Assets/x.png".
+        drive, tail = os.path.splitdrive(path)
+        if not drive and (tail.startswith("/") or tail.startswith("\\")):
+            candidate = os.path.join(base_dir, tail.lstrip("/\\"))
+            if os.path.exists(candidate):
+                return candidate
+
+        # Handle plain relative paths.
+        if not os.path.isabs(path):
+            candidate = os.path.join(base_dir, path)
+            if os.path.exists(candidate):
+                return candidate
+
+        return None
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -99,6 +131,13 @@ class CandidateProfileModal(QDialog):
         if photo_path and not os.path.isabs(photo_path):
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             photo_path = os.path.join(base_dir, photo_path)
+
+        # Candidate placeholder when missing
+        if not photo_path or not os.path.exists(str(photo_path)):
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            placeholder = os.path.join(base_dir, "Assets", "lam.png")
+            if os.path.exists(placeholder):
+                photo_path = placeholder
 
         full_name = candidate.get("full_name", "Unknown")
         avatar_initial = full_name[:1] or "?"
@@ -215,9 +254,15 @@ class CandidateCard(QFrame):
 
         # Resolve relative photos to absolute paths
         resolved_photo = photo_path
-        if resolved_photo and not os.path.isabs(resolved_photo):
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            resolved_photo = os.path.join(base_dir, resolved_photo)
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if resolved_photo and not os.path.isabs(str(resolved_photo)):
+            resolved_photo = os.path.join(base_dir, str(resolved_photo))
+
+        # Candidate placeholder when missing
+        if not resolved_photo or not os.path.exists(str(resolved_photo)):
+            placeholder = os.path.join(base_dir, "Assets", "lam.png")
+            if os.path.exists(placeholder):
+                resolved_photo = placeholder
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 18, 16, 16)
@@ -479,9 +524,15 @@ class PositionCandidateCard(QFrame):
 
         # Resolve relative photos
         resolved_photo = photo_path
-        if resolved_photo and not os.path.isabs(resolved_photo):
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            resolved_photo = os.path.join(base_dir, resolved_photo)
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if resolved_photo and not os.path.isabs(str(resolved_photo)):
+            resolved_photo = os.path.join(base_dir, str(resolved_photo))
+
+        # Candidate placeholder when missing (keep Abstain as no-photo)
+        if self.candidate_id and (not resolved_photo or not os.path.exists(str(resolved_photo))):
+            placeholder = os.path.join(base_dir, "Assets", "lam.png")
+            if os.path.exists(placeholder):
+                resolved_photo = placeholder
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 16, 14, 14)
@@ -722,6 +773,13 @@ class BallotVotingModal(QDialog):
         subtitle.setStyleSheet("color: #6B7280;")
         header_layout.addWidget(subtitle)
 
+        # Partial ballot hint
+        self.partial_hint = QLabel("")
+        self.partial_hint.setFont(QFont("Segoe UI", 10))
+        self.partial_hint.setStyleSheet("color: #6B7280;")
+        self.partial_hint.setVisible(False)
+        header_layout.addWidget(self.partial_hint)
+
         # Progress tracker
         progress_container = QHBoxLayout()
         progress_container.setSpacing(12)
@@ -859,6 +917,12 @@ class BallotVotingModal(QDialog):
         remaining = sum(1 for s in self._position_sections if not s.is_locked())
         remaining_done = sum(1 for s in self._position_sections if (not s.is_locked()) and s.get_selected_candidate_id() is not None)
         self.progress_label.setText(f"Progress: {completed}/{total} positions completed")
+
+        if total > 0 and len(self._voted_position_ids) > 0 and remaining > 0:
+            self.partial_hint.setText("Some positions are already completed and locked. Submit the remaining positions to finish.")
+            self.partial_hint.setVisible(True)
+        else:
+            self.partial_hint.setVisible(False)
 
         # Update progress bar
         if total > 0:

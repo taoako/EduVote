@@ -1,7 +1,4 @@
-"""
-Report generation controller - handles all backend logic for generating election reports.
-FINAL FIX: Uses direct string headers for tables to guarantee visibility.
-"""
+
 from datetime import datetime
 from Models.base import get_connection
 from Models.model_db import Database

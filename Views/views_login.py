@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap, QColor, QFont, QCursor
+from Models.validators import is_valid_email
 
 class LoginView(QMainWindow):
     def __init__(self):
@@ -308,6 +309,9 @@ class LoginView(QMainWindow):
 
             if not sid or not em or not pw1 or not pw2:
                 QMessageBox.warning(dlg, "Missing Info", "Please fill in all fields.")
+                return
+            if not is_valid_email(em):
+                QMessageBox.warning(dlg, "Invalid Email", "Please enter a valid email address (example: name@school.com).")
                 return
             if len(pw1) < 6:
                 QMessageBox.warning(dlg, "Weak Password", "Password must be at least 6 characters.")

@@ -6,6 +6,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QFont, QColor, QCursor
 from PyQt6.QtCore import Qt, QDate, pyqtSignal
+from datetime import date, datetime
+import traceback
 
 from .admin_components import GreenButton, DataTable, StatusBadge, ActionButton, SearchBar
 from Controller.controller_elections import (
@@ -59,12 +61,13 @@ class CandidateSelectCard(QFrame):
         info_layout.setSpacing(2)
         info_layout.setContentsMargins(0, 0, 0, 0)
 
-        name = QLabel(candidate.get('full_name', 'Unknown')[:18])
+        full_name = str(candidate.get('full_name') or 'Unknown')
+        name = QLabel(full_name[:18])
         name.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         name.setStyleSheet("color: #111827; background: transparent;")
         info_layout.addWidget(name)
 
-        slogan = candidate.get('slogan', '')[:25]
+        slogan = str(candidate.get('slogan') or '')[:25]
         if slogan:
             slogan_lbl = QLabel(slogan)
             slogan_lbl.setFont(QFont("Segoe UI", 8))
@@ -109,6 +112,20 @@ class PositionWidget(QFrame):
     """Widget for managing a single position with its candidates."""
     remove_clicked = pyqtSignal(object)  # self
     candidates_changed = pyqtSignal()
+
+    COMMON_POSITIONS = [
+        "President",
+        "Vice President",
+        "Secretary",
+        "Assistant Secretary",
+        "Treasurer",
+        "Assistant Treasurer",
+        "Auditor",
+        "Public Relations Officer",
+        "Sergeant-at-Arms",
+        "Representative",
+        "Senator",
+    ]
 
     def __init__(self, position_title: str = "", all_candidates: list = None, selected_candidate_ids: list = None, position_id: int = None):
         super().__init__()
@@ -176,6 +193,46 @@ class PositionWidget(QFrame):
 
         layout.addLayout(header)
 
+        # Common positions dropdown
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(10)
+
+        preset_label = QLabel("Common Position")
+        preset_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        preset_label.setStyleSheet("color: #6B7280; background: transparent;")
+        preset_row.addWidget(preset_label)
+
+        self.common_combo = QComboBox()
+        self.common_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+                padding: 6px 10px;
+                background: #FFFFFF;
+                color: #111827;
+            }
+            QComboBox:focus {
+                border: 2px solid #10B981;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                color: #111827;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #E5E7EB;
+                color: #111827;
+            }
+        """)
+        self.common_combo.setFixedHeight(34)
+        self.common_combo.addItem("Select common position", "")
+        for name in self.COMMON_POSITIONS:
+            self.common_combo.addItem(name, name)
+        self.common_combo.currentIndexChanged.connect(self._apply_common_position)
+        preset_row.addWidget(self.common_combo, 1)
+
+        layout.addLayout(preset_row)
+
         # Candidates label
         cand_label = QLabel("Select Candidates")
         cand_label.setFont(QFont("Segoe UI", 10))
@@ -233,6 +290,11 @@ class PositionWidget(QFrame):
             self.selected_candidate_ids.discard(candidate_id)
         self.candidates_changed.emit()
 
+    def _apply_common_position(self):
+        selected = self.common_combo.currentData() or ""
+        if selected:
+            self.title_input.setText(selected)
+
     def get_data(self) -> dict:
         return {
             "position_id": self.position_id,
@@ -252,6 +314,8 @@ class ElectionDialog(QDialog):
     def __init__(self, parent=None, election: dict = None):
         super().__init__(parent)
         self.election = election
+        self._original_start_date = None
+        self._original_end_date = None
         self.sections = list_sections_lookup() or []
         self.adding_new_section = False
         self.position_widgets = []
@@ -499,15 +563,21 @@ class ElectionDialog(QDialog):
     def _prefill_election(self, election: dict):
         """Pre-fill form with existing election data."""
         self.title_input.setText(election.get('title', ''))
-        if election.get('start_date'):
-            self.start_date.setDate(QDate.fromString(str(election['start_date']), "yyyy-MM-dd"))
-        if election.get('end_date'):
-            self.end_date.setDate(QDate.fromString(str(election['end_date']), "yyyy-MM-dd"))
+        start_val = election.get('start_date')
+        end_val = election.get('end_date')
+        if start_val:
+            parsed_start = QDate.fromString(str(start_val), "yyyy-MM-dd")
+            self.start_date.setDate(parsed_start)
+            self._original_start_date = parsed_start
+        if end_val:
+            parsed_end = QDate.fromString(str(end_val), "yyyy-MM-dd")
+            self.end_date.setDate(parsed_end)
+            self._original_end_date = parsed_end
 
         # Load existing positions
         election_id = election.get('election_id')
         if election_id:
-            ballot_data = get_election_ballot_data(election_id)
+            ballot_data = get_election_ballot_data(election_id) or {"positions": []}
             positions = ballot_data.get('positions', [])
             for pos_data in positions:
                 pos = pos_data.get('position', {})
@@ -545,6 +615,20 @@ class ElectionDialog(QDialog):
         # Validate
         if not self.title_input.text().strip():
             QMessageBox.warning(self, "Validation Error", "Election title is required.")
+            return
+
+        today = QDate.currentDate()
+        start = self.start_date.date()
+        end = self.end_date.date()
+
+        if start < today:
+            QMessageBox.warning(self, "Validation Error", "Start date cannot be before today.")
+            return
+        if end < today:
+            QMessageBox.warning(self, "Validation Error", "End date cannot be before today.")
+            return
+        if end < start:
+            QMessageBox.warning(self, "Validation Error", "End date cannot be earlier than start date.")
             return
 
         # Validate positions
@@ -667,12 +751,43 @@ class ManageElectionsPage(QWidget):
         self.search_bar.setFixedWidth(300)
         self.search_bar.textChanged.connect(self._filter_elections)
 
+        self.status_filter = QComboBox()
+        self.status_filter.setFixedHeight(36)
+        self.status_filter.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+                padding: 6px 10px;
+                background: #FFFFFF;
+                color: #111827;
+            }
+            QComboBox:focus {
+                border: 2px solid #10B981;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                color: #111827;
+            }
+            QComboBox QAbstractItemView::item:selected {
+                background-color: #E5E7EB;
+                color: #111827;
+            }
+        """)
+        self.status_filter.addItem("All Statuses", "")
+        self.status_filter.addItem("Active", "active")
+        self.status_filter.addItem("Upcoming", "upcoming")
+        self.status_filter.addItem("Finalized", "finalized")
+        self.status_filter.currentIndexChanged.connect(self._filter_elections)
+
         create_btn = GreenButton("Create New Election")
         create_btn.clicked.connect(self._create_election)
 
         header_row.addWidget(title)
         header_row.addStretch()
         header_row.addWidget(self.search_bar)
+        header_row.addSpacing(10)
+        header_row.addWidget(self.status_filter)
         header_row.addSpacing(15)
         header_row.addWidget(create_btn)
         card_layout.addLayout(header_row)
@@ -689,9 +804,11 @@ class ManageElectionsPage(QWidget):
             self._elections = list_elections()
             # Load position counts for each election
             for election in self._elections:
+                if not isinstance(election, dict):
+                    continue
                 eid = election.get('election_id')
                 positions = get_positions_for_election(eid) if eid else []
-                election['position_count'] = len(positions)
+                election['position_count'] = len(positions or [])
             self._filter_elections()
         except Exception as e:
             print(f"Load elections error: {e}")
@@ -699,11 +816,14 @@ class ManageElectionsPage(QWidget):
     def _filter_elections(self):
         """Filter elections based on search text."""
         search_text = self.search_bar.text().lower().strip()
+        status_filter = (self.status_filter.currentData() or "").strip().lower()
         filtered = [
             e for e in self._elections
             if search_text in e.get('title', '').lower() or
                search_text in e.get('status', '').lower()
         ]
+        if status_filter:
+            filtered = [e for e in filtered if (e.get('status') or '').lower() == status_filter]
         self._populate_table(filtered)
 
     def _populate_table(self, elections=None):
@@ -741,12 +861,18 @@ class ManageElectionsPage(QWidget):
             pause_btn = ActionButton("pause" if status == 'active' else "play")
             edit_btn = ActionButton("edit")
             delete_btn = ActionButton("delete")
-            delete_btn.setEnabled(False)
-            delete_btn.setToolTip("Deleting elections is disabled. Finalize instead.")
+            delete_btn.setEnabled(True)
+            delete_btn.setToolTip("Mark election as ended")
 
             election_id = election.get('election_id')
-            edit_btn.clicked.connect(lambda checked, eid=election_id: self._edit_election(eid))
-            pause_btn.clicked.connect(lambda checked, eid=election_id, st=status: self._toggle_status(eid, st))
+            edit_btn.setProperty("election_id", election_id)
+            pause_btn.setProperty("election_id", election_id)
+            pause_btn.setProperty("current_status", status)
+            delete_btn.setProperty("election_id", election_id)
+
+            edit_btn.clicked.connect(self._on_edit_clicked)
+            pause_btn.clicked.connect(self._on_toggle_clicked)
+            delete_btn.clicked.connect(self._on_end_clicked)
 
             actions_layout.addWidget(pause_btn)
             actions_layout.addWidget(edit_btn)
@@ -757,6 +883,43 @@ class ManageElectionsPage(QWidget):
 
         for i in range(self.table.rowCount()):
             self.table.setRowHeight(i, 55)
+
+    def _on_edit_clicked(self):
+        btn = self.sender()
+        try:
+            election_id = btn.property("election_id") if btn is not None else None
+        except Exception:
+            election_id = None
+
+        if not election_id:
+            QMessageBox.warning(self, "Error", "Missing election id for this row.")
+            return
+        self._edit_election(int(election_id))
+
+    def _on_toggle_clicked(self):
+        btn = self.sender()
+        try:
+            election_id = btn.property("election_id") if btn is not None else None
+            current_status = btn.property("current_status") if btn is not None else None
+        except Exception:
+            election_id, current_status = None, None
+
+        if not election_id:
+            QMessageBox.warning(self, "Error", "Missing election id for this row.")
+            return
+        self._toggle_status(int(election_id), str(current_status or ""))
+
+    def _on_end_clicked(self):
+        btn = self.sender()
+        try:
+            election_id = btn.property("election_id") if btn is not None else None
+        except Exception:
+            election_id = None
+
+        if not election_id:
+            QMessageBox.warning(self, "Error", "Missing election id for this row.")
+            return
+        self._set_status_with_confirmation(int(election_id), "finalized")
 
     def _create_election(self):
         """Open dialog to create a new election with positions."""
@@ -786,23 +949,35 @@ class ManageElectionsPage(QWidget):
 
     def _edit_election(self, election_id: int):
         """Open dialog to edit an existing election."""
-        election = next((e for e in self._elections if e['election_id'] == election_id), None)
-        if not election:
-            return
-
-        dialog = ElectionDialog(self, election)
-        if dialog.exec():
-            data = dialog.get_data()
-            positions_data = data.pop('positions', [])
-
-            ok, msg = update_election(election_id, data)
-            if not ok:
-                QMessageBox.warning(self, "Error", msg)
+        try:
+            election = next((e for e in self._elections if e.get('election_id') == election_id), None)
+            if not election:
+                QMessageBox.warning(self, "Error", "Election not found. Please refresh and try again.")
                 return
 
-            # Update positions
-            self._save_positions(election_id, positions_data)
-            self._load_data()
+            dialog = ElectionDialog(self, election)
+            if dialog.exec():
+                data = dialog.get_data()
+                positions_data = data.pop('positions', [])
+
+                ok, msg = update_election(election_id, data)
+                if not ok:
+                    QMessageBox.warning(self, "Error", msg)
+                    return
+
+                # Update positions
+                self._save_positions(election_id, positions_data)
+                self._load_data()
+        except Exception as e:
+            details = traceback.format_exc()
+            print(details)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("Edit Failed")
+            box.setText("Failed to open or save election edit.")
+            box.setInformativeText(str(e))
+            box.setDetailedText(details)
+            box.exec()
 
     def _save_positions(self, election_id: int, positions_data: list):
         """Save positions and candidate assignments for an election."""
@@ -810,8 +985,12 @@ class ManageElectionsPage(QWidget):
         db = Database()
 
         # Get existing positions
-        existing_positions = get_positions_for_election(election_id)
-        existing_ids = {p['position_id'] for p in existing_positions}
+        existing_positions = get_positions_for_election(election_id) or []
+        existing_ids = {
+            (p or {}).get('position_id')
+            for p in existing_positions
+            if isinstance(p, dict) and (p or {}).get('position_id') is not None
+        }
 
         new_position_ids = set()
         for idx, pos_data in enumerate(positions_data):
@@ -840,6 +1019,35 @@ class ManageElectionsPage(QWidget):
         for old_id in existing_ids - new_position_ids:
             delete_position(old_id)
 
+    def _parse_date(self, value):
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        try:
+            return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    def _expected_status(self, start_date, end_date):
+        today = date.today()
+        start = self._parse_date(start_date)
+        end = self._parse_date(end_date)
+
+        if start and today < start:
+            return "upcoming"
+        if end and today > end:
+            return "finalized"
+        if start and end and start <= today <= end:
+            return "active"
+        if start and not end and today >= start:
+            return "active"
+        if end and not start:
+            return "active" if today <= end else "finalized"
+        return None
+
     def _toggle_status(self, election_id: int, current_status: str):
         """Toggle election status between active and upcoming."""
         if current_status == 'active':
@@ -850,7 +1058,44 @@ class ManageElectionsPage(QWidget):
         else:
             target = 'active'
 
-        ok, msg = set_election_status(election_id, target)
+        self._set_status_with_confirmation(election_id, target)
+
+    def _set_status_with_confirmation(self, election_id: int, target: str):
+        election = next((e for e in self._elections if e.get('election_id') == election_id), None)
+        expected = None
+        if election:
+            expected = self._expected_status(election.get('start_date'), election.get('end_date'))
+
+        warning_msg = None
+        if expected and target != expected:
+            if target == "active":
+                warning_msg = "This election is outside its scheduled dates. Activate anyway?"
+            elif target in ("finalized", "ended"):
+                warning_msg = "This election has not reached its end date. Mark as ended anyway?"
+            elif target == "upcoming":
+                warning_msg = "This election has already started or ended. Set to upcoming anyway?"
+            else:
+                warning_msg = "Status does not match the configured dates. Continue anyway?"
+
+        if warning_msg:
+            confirm_text = f"{warning_msg}\n\nChange election status to {target.title()}?"
+            confirm = QMessageBox.question(
+                self,
+                "Confirm Status Change",
+                confirm_text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+        else:
+            confirm = QMessageBox.question(
+                self,
+                "Confirm Status Change",
+                f"Change election status to {target.title()}?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        ok, msg = set_election_status(election_id, target, force=True)
         if not ok:
             QMessageBox.warning(self, "Error", msg)
         else:
